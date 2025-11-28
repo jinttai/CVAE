@@ -4,6 +4,7 @@ import time
 import matplotlib.pyplot as plt
 import os
 import sys
+import csv
 
 # 프로젝트 루트 경로 설정 (Import 에러 방지)
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +86,7 @@ def main():
     # 손실 기록용 리스트
     train_losses = []
     val_losses = []
+    epoch_durations = []
     
     for epoch in range(NUM_EPOCHS):
         # --- Training Step ---
@@ -113,6 +115,7 @@ def main():
         writer.add_scalar('Loss/train', loss_value, epoch)
         
         epoch_duration = time.time() - epoch_start_time
+        epoch_durations.append(epoch_duration)
         print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] | Loss: {loss.item():.6f} | Time: {epoch_duration:.2f}s")
         epoch_start_time = time.time()
         
@@ -140,8 +143,32 @@ def main():
     if not os.path.exists(plots_dir):
         os.makedirs(plots_dir)
 
+    # CSV 저장을 위한 타임스탬프
+    timestamp = time.time()
+
     if len(train_losses) > 0:
         epochs = list(range(1, len(train_losses) + 1))
+        
+        # CSV 파일 저장
+        csv_dir = os.path.join(plots_dir, "mlp_training_curve")
+        if not os.path.exists(csv_dir):
+            os.makedirs(csv_dir)
+        csv_path = os.path.join(csv_dir, f"{timestamp}.csv")
+        
+        with open(csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['epoch', 'train_loss', 'epoch_duration', 'val_loss'])
+            
+            # Validation loss를 딕셔너리로 변환 (빠른 조회를 위해)
+            val_dict = {e: v for e, v in val_losses}
+            
+            for i, (epoch, train_loss, duration) in enumerate(zip(epochs, train_losses, epoch_durations)):
+                val_loss = val_dict.get(epoch, '')
+                writer.writerow([epoch, train_loss, duration, val_loss])
+        
+        print(f"Training data saved to: {csv_path}")
+        
+        # 플롯 저장
         plt.figure(figsize=(8, 5))
         plt.plot(epochs, train_losses, label="Train Loss")
 
@@ -155,14 +182,19 @@ def main():
         plt.title("MLP Training Curve")
         plt.grid(True)
         plt.legend()
-        save_path = os.path.join(plots_dir, "mlp_training_curve.png")
+        save_dir = os.path.join(plots_dir, "mlp_training_curve")
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        save_path = os.path.join(save_dir, f"{timestamp}.png")
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
     
     # 모델 저장
-    if not os.path.exists("weights"):
-        os.makedirs("weights")
-    torch.save(model.state_dict(), f"weights/cvae_debug/{time.time()}.pth")
+    save_dir = os.path.join("weights/cvae_debug")
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    save_path = os.path.join(save_dir, f"{time.time()}.pth")
+    torch.save(model.state_dict(), save_path)
     writer.close()
 
 if __name__ == "__main__":
