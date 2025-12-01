@@ -90,9 +90,9 @@ def main():
     
     print("\n--- [Task 1] Fixed Goal Optimization with CVAE Init (LBFGS) ---")
     
-    # 2. CVAE Inference (Warm Start)
-    start_time = time.time()
-    
+    # 2. CVAE Inference (Warm Start) - 추론 시간 측정
+    inference_start = time.time()
+
     cvae = load_model(CVAE, cvae_path, COND_DIM, OUTPUT_DIM, LATENT_DIM, device)
     
     with torch.no_grad():
@@ -111,6 +111,8 @@ def main():
         best_idx = torch.argmin(losses)
         best_waypoints = candidates[best_idx].unsqueeze(0).clone() # Best 1개 선택
         best_loss = losses[best_idx].item()
+
+    inference_end = time.time()
 
     print(f"[CVAE Init] Selected best of {num_samples} samples with loss {best_loss:.8f}")
     
@@ -146,15 +148,16 @@ def main():
         return loss
 
     # LBFGS는 step() 한 번 호출에 내부적으로 여러 번 반복(iter)함
+    opt_start = time.time()
     optimizer.step(closure)
+    opt_end = time.time()
     
-    end_time = time.time()
-    
-    # 결과 확인
+    # 결과 확인 및 시간 출력
     final_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal).item()
     final_deg = np.rad2deg(np.sqrt(final_loss)) if final_loss > 0 else 0.0 # sqrt for L2 loss assumption
     
-    print(f"Optimization Finished (LBFGS). Time: {end_time - start_time:.4f}s")
+    print(f"Inference Finished (CVAE warm start). Time: {inference_end - inference_start:.4f}s")
+    print(f"Optimization Finished (LBFGS). Time: {opt_end - opt_start:.4f}s")
     print(f"Final Error: {final_loss:.10f}")
     print(f"Iterations: {len(loss_history)}")
     

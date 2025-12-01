@@ -118,12 +118,10 @@ def main():
         with torch.no_grad():
             waypoints = cvae.decode(cond_batch, z)
             
-            # 물리 시뮬레이션 (vmap 활용)
-            # calculate_loss는 평균을 내버리므로, 개별 오차를 얻기 위해 직접 호출
+            # 물리 시뮬레이션 (vmap 활용) - RK4 기반 최종 오차 사용
             q_traj, q_dot_traj = physics.generate_trajectory(waypoints)
             
-            # vmap으로 개별 오차 계산
-            batch_sim_fn = torch.func.vmap(physics.simulate_single, in_dims=(0, 0, 0, 0))
+            batch_sim_fn = torch.func.vmap(physics.simulate_single_rk4, in_dims=(0, 0, 0, 0))
             errors = batch_sim_fn(q_traj, q_dot_traj, start_batch, goal_batch)
             
         # 결과 정리
@@ -156,7 +154,7 @@ def main():
             wp = mlp(condition)
             # MLP는 1개이므로 배치 차원 유지
             q_traj, q_dot_traj = physics.generate_trajectory(wp)
-            error = physics.simulate_single(q_traj[0], q_dot_traj[0], q0_start[0], q0_goal[0])
+            error = physics.simulate_single_rk4(q_traj[0], q_dot_traj[0], q0_start[0], q0_goal[0])
             
         err_val = error.item()
         err_deg = np.rad2deg(np.sqrt(err_val))

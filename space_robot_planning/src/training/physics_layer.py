@@ -136,6 +136,60 @@ class PhysicsLayer:
         # 오차를 제곱하여 큰 오차에 더 큰 페널티 (L2 Loss 성격)
         return angle_error ** 2
 
+    # ------------------------------------------------------------------
+    # RK4 기반 평가용 시뮬레이션 (최적화에는 사용하지 않고, 평가 전용)
+    # ------------------------------------------------------------------
+    def _quat_deriv(self, q, wb):
+        """
+        쿼터니언 q = [x, y, z, w]와 각속도 wb에 대한 dq/dt 계산
+        """
+        xyz = q[:3]
+        w = q[3]
+        d_xyz = 0.5 * (w * wb + torch.linalg.cross(wb, xyz))
+        d_w = -0.5 * torch.dot(wb, xyz)
+        return torch.cat([d_xyz, d_w.unsqueeze(0)])
+
+    def simulate_single_rk4(self, q_traj, q_dot_traj, q0_init, q0_goal):
+        """
+        [Evaluation 전용 Physics Engine with RK4 integration]
+        각속도 wb로부터 쿼터니언을 4차 Runge-Kutta로 적분하여 최종 자세 오차를 계산
+        """
+        R0 = torch.eye(3, device=self.device)
+        r0 = torch.zeros(3, device=self.device)
+
+        q0_curr = q0_init
+
+        for t in range(self.num_steps):
+            qm = q_traj[t]
+            qd = q_dot_traj[t]
+
+            # Dynamics (wb 계산까지는 기존과 동일)
+            RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, self.robot)
+            Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, self.robot)
+            I0, Im = spart.inertia_projection(R0, RL, self.robot)
+            M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, self.robot)
+            H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot)
+
+            rhs = -H0m @ qd
+            H0_damped = H0 + 1e-6 * torch.eye(6, device=self.device)
+            u0_sol = torch.linalg.solve(H0_damped, rhs)
+            wb = u0_sol[:3]
+
+            # RK4 integration for quaternion
+            k1 = self._quat_deriv(q0_curr, wb)
+            k2 = self._quat_deriv(q0_curr + 0.5 * self.dt * k1, wb)
+            k3 = self._quat_deriv(q0_curr + 0.5 * self.dt * k2, wb)
+            k4 = self._quat_deriv(q0_curr + self.dt * k3, wb)
+
+            q0_curr = q0_curr + (self.dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+            q0_curr = q0_curr / torch.norm(q0_curr)
+
+        # 최종 각도 오차 계산 (simulate_single과 동일한 정의)
+        dot_prod = torch.abs(torch.sum(q0_curr * q0_goal))
+        dot_prod = torch.clamp(dot_prod, -1.0 + 1e-7, 1.0 - 1e-7)
+        angle_error = 2 * torch.acos(dot_prod)
+        return angle_error ** 2
+
     def calculate_loss(self, waypoints_flat, q0_init, q0_goal):
         """
         Batched Physics Simulation using vmap
@@ -152,4 +206,13 @@ class PhysicsLayer:
         loss_batch = batch_sim_fn(q_traj, q_dot_traj, q0_init, q0_goal)
         
         # 4. Mean Loss
+        return loss_batch.mean()
+
+    def calculate_loss_rk4(self, waypoints_flat, q0_init, q0_goal):
+        """
+        RK4 기반 최종 자세 오차를 사용한 평가용 loss 계산 (최적화에는 사용 X)
+        """
+        q_traj, q_dot_traj = self.generate_trajectory(waypoints_flat)
+        batch_sim_fn = vmap(self.simulate_single_rk4, in_dims=(0, 0, 0, 0))
+        loss_batch = batch_sim_fn(q_traj, q_dot_traj, q0_init, q0_goal)
         return loss_batch.mean()
