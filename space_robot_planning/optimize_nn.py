@@ -107,13 +107,27 @@ def main():
     
     print(f"\n--- [Task 1] Fixed Goal Optimization with {model_type.upper()} Init ---")
     
-    # 3. NN을 이용한 initial guess 계산
+    # 3. NN을 이용한 initial guess 계산 + 이후 gradient 최적화까지 시간을 측정
+    #    (로봇 로드 등은 포함하지 않고, NN inference + optimize 전체를 포함)
+    start_time = time.time()
+
     with torch.no_grad():
         condition = torch.cat([q0_start, q0_goal], dim=1)
         if model_type == 'cvae':
-            # CVAE: z 샘플링 후 decode
-            z = torch.randn(1, LATENT_DIM, device=device)
-            init_waypoints = nn_model.decode(condition, z)
+            # CVAE: 여러 번 (예: 100번) 샘플링 후, 가장 낮은 physics loss를 주는 궤적 선택
+            num_samples = 100
+            best_loss = None
+            best_wp = None
+            for i in range(num_samples):
+                z = torch.randn(1, LATENT_DIM, device=device)
+                wp_candidate = nn_model.decode(condition, z)
+                loss_candidate = physics.calculate_loss(wp_candidate, q0_start, q0_goal)
+                loss_val = loss_candidate.item()
+                if best_loss is None or loss_val < best_loss:
+                    best_loss = loss_val
+                    best_wp = wp_candidate
+            print(f"[CVAE Init] Selected best of {num_samples} samples with loss {best_loss:.6f}")
+            init_waypoints = best_wp
         else:
             # MLP: deterministic forward
             init_waypoints = nn_model(condition)
@@ -129,9 +143,6 @@ def main():
     iterations = 200  # 최대 반복 횟수
     loss_history = []
     stop_threshold = 1e-4  # 손실이 이 값 아래로 떨어지면 조기 종료
-
-    # === 여기서부터 시간 측정: NN forward, 로봇 로드 등은 포함 X ===
-    start_time = time.time()
     
     for i in range(iterations):
         optimizer.zero_grad()
