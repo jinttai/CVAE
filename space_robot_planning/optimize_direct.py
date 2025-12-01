@@ -64,8 +64,8 @@ def main():
     # 2. 최적화 대상 데이터 생성
     # ==========================================
     # (A) 고정된 목표 (Visual Check용)
-    q0_start = torch.tensor([[0., 0., 0., 1.]], device=device)
-    q0_goal = torch.tensor([[0., 0., 0.7071, 0.7071]], device=device) # 90 deg Z
+    q0_start = torch.tensor([[0., 0., 0., 1.]], device=device, dtype=torch.float32)
+    q0_goal = torch.tensor([[0., 0., 0.7071, 0.7071]], device=device, dtype=torch.float32) # 90 deg Z
     
     print("\n--- [Task 1] Fixed Goal Optimization ---")
     
@@ -101,7 +101,8 @@ def main():
         loss_value = loss.item()
         loss_history.append(loss_value)
         
-        if (i + 1) % 20 == 0:
+        # 0~20 iteration: 매번 출력, 21번 이후: 10번마다 출력
+        if (i + 1) <= 20 or (i + 1) % 10 == 0:
             print(f"Iter [{i+1}/{iterations}] Loss: {loss_value:.6f}")
         
         # 조기 종료 조건

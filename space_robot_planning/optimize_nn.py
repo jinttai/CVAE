@@ -6,15 +6,14 @@ import sys
 import time
 import numpy as np
 
-# 프로젝트 루트 경로 설정
+# 프로젝트 루트 경로 설정 (Import 에러 방지)
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 sys.path.append(os.path.join(current_dir, 'src'))
 
+from src.models.cvae import CVAE, MLP
 from src.training.physics_layer import PhysicsLayer
 from src.dynamics.urdf2robot_torch import urdf2robot
-from src.models.cvae import CVAE, MLP
-
 
 def plot_trajectory(q_traj, q_dot_traj, title, save_path):
     q_traj = q_traj.detach().cpu().numpy()
@@ -42,135 +41,122 @@ def plot_trajectory(q_traj, q_dot_traj, title, save_path):
     plt.close()
     print(f"Saved plot to {save_path}")
 
-
-def load_cvae(device, robot, weights_path="weights/cvae_debug/v1.pth"):
-    """학습된 CVAE 로드 (initial guess용)"""
-    COND_DIM = 8
-    NUM_WAYPOINTS = 4
-    OUTPUT_DIM = NUM_WAYPOINTS * robot['n_q']
-    LATENT_DIM = 8
-
-    model = CVAE(COND_DIM, OUTPUT_DIM, LATENT_DIM).to(device)
+def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None, device='cpu'):
+    if model_class == CVAE:
+        model = CVAE(input_dim, output_dim, latent_dim).to(device)
+    else:
+        model = MLP(input_dim, output_dim).to(device)
+        
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"Weight file not found: {weights_path}")
+        
+    print(f"Loading weights from: {weights_path}")
     model.load_state_dict(torch.load(weights_path, map_location=device))
     model.eval()
-    return model, NUM_WAYPOINTS, OUTPUT_DIM
-
-
-def load_mlp(device, robot, weights_path="weights/mlp_debug/v1.pth"):
-    """학습된 MLP 로드 (initial guess용)"""
-    COND_DIM = 8
-    NUM_WAYPOINTS = 4
-    OUTPUT_DIM = NUM_WAYPOINTS * robot['n_q']
-
-    model = MLP(COND_DIM, OUTPUT_DIM).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device))
-    model.eval()
-    return model, NUM_WAYPOINTS, OUTPUT_DIM
-
+    return model
 
 def main():
     # 1. 설정
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"=== NN-based Initialization + Gradient Optimization Start on {device} ===")
+    print(f"=== NN-based Initialization + LBFGS Refinement Start on {device} ===")
     
     # 로봇 로드
     robot, _ = urdf2robot("assets/SC_ur10e.urdf", verbose_flag=False, device=device)
     
-    # 어떤 네트워크를 사용할지 선택 ( 'cvae' 또는 'mlp' )
-    # 간단히 코드 상단에서 문자열로 변경해서 사용
-    model_type = 'cvae'  # 'cvae' 또는 'mlp'
+    # 파라미터 (학습 코드와 일치)
+    COND_DIM = 8
+    NUM_WAYPOINTS = 4
+    OUTPUT_DIM = NUM_WAYPOINTS * robot['n_q']
+    LATENT_DIM = 8
+    TOTAL_TIME = 1.0 # 1초
     
-    if model_type == 'cvae':
-        nn_model, NUM_WAYPOINTS, OUTPUT_DIM = load_cvae(device, robot)
-        LATENT_DIM = nn_model.latent_dim if hasattr(nn_model, "latent_dim") else 8
-    elif model_type == 'mlp':
-        nn_model, NUM_WAYPOINTS, OUTPUT_DIM = load_mlp(device, robot)
-        LATENT_DIM = None
-    else:
-        raise ValueError("model_type must be 'cvae' or 'mlp'")
-
-    TOTAL_TIME = 1.0  # 학습/평가 코드와 일치
-
     # 물리 엔진
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
     
     # 결과 저장
-    save_dir = f"results/opt_nn_{model_type}"
+    save_dir = "results/opt_nn_lbfgs"
     os.makedirs(save_dir, exist_ok=True)
 
-    # ==========================================
-    # 2. 최적화 대상 데이터 생성
-    # ==========================================
-    # (A) 고정된 목표 (Visual Check용)
-    q0_start = torch.tensor([[0., 0., 0., 1.]], device=device)
-    q0_goal = torch.tensor([[0., 0., 0.7071, 0.7071]], device=device)  # 90 deg Z
+    # 모델 가중치 경로
+    cvae_path = "weights/cvae_debug/v1.pth"
+    # mlp_path = "weights/mlp_debug/v1.pth"
     
-    print(f"\n--- [Task 1] Fixed Goal Optimization with {model_type.upper()} Init ---")
+    # ==========================================
+    # [Task] Fixed Goal Optimization
+    # ==========================================
+    q0_start = torch.tensor([[0., 0., 0., 1.]], device=device, dtype=torch.float32)
+    q0_goal = torch.tensor([[0., 0., 0.7071, 0.7071]], device=device, dtype=torch.float32) # 90 deg Z
+    condition = torch.cat([q0_start, q0_goal], dim=1)
     
-    # 3. NN을 이용한 initial guess 계산 + 이후 gradient 최적화까지 시간을 측정
-    #    (로봇 로드 등은 포함하지 않고, NN inference + optimize 전체를 포함)
+    print("\n--- [Task 1] Fixed Goal Optimization with CVAE Init (LBFGS) ---")
+    
+    # 2. CVAE Inference (Warm Start)
     start_time = time.time()
-
+    
+    cvae = load_model(CVAE, cvae_path, COND_DIM, OUTPUT_DIM, LATENT_DIM, device)
+    
     with torch.no_grad():
-        condition = torch.cat([q0_start, q0_goal], dim=1)
-        if model_type == 'cvae':
-            # CVAE: 여러 번 (예: 100번) 샘플링 후, 가장 낮은 physics loss를 주는 궤적 선택
-            num_samples = 100
-            best_loss = None
-            best_wp = None
-            for i in range(num_samples):
-                z = torch.randn(1, LATENT_DIM, device=device)
-                wp_candidate = nn_model.decode(condition, z)
-                loss_candidate = physics.calculate_loss(wp_candidate, q0_start, q0_goal)
-                loss_val = loss_candidate.item()
-                if best_loss is None or loss_val < best_loss:
-                    best_loss = loss_val
-                    best_wp = wp_candidate
-            print(f"[CVAE Init] Selected best of {num_samples} samples with loss {best_loss:.6f}")
-            init_waypoints = best_wp
-        else:
-            # MLP: deterministic forward
-            init_waypoints = nn_model(condition)
+        # 10개 샘플링하여 가장 좋은 것 선택
+        num_samples = 10
+        z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
+        cond_batch = condition.repeat(num_samples, 1)
+        
+        candidates = cvae.decode(cond_batch, z)
+        
+        # 물리 엔진으로 평가 (vmap 사용)
+        q_traj, q_dot_traj = physics.generate_trajectory(candidates)
+        batch_sim_fn = torch.func.vmap(physics.simulate_single, in_dims=(0,0,0,0))
+        losses = batch_sim_fn(q_traj, q_dot_traj, q0_start.repeat(num_samples, 1), q0_goal.repeat(num_samples, 1))
+        
+        best_idx = torch.argmin(losses)
+        best_waypoints = candidates[best_idx].unsqueeze(0).clone() # Best 1개 선택
+        best_loss = losses[best_idx].item()
+
+    print(f"[CVAE Init] Selected best of {num_samples} samples with loss {best_loss:.8f}")
     
-    # 4. 최적화 변수 (Waypoints) 초기화
-    waypoints_param = init_waypoints.detach().clone().to(device)
-    waypoints_param.requires_grad = True  # [중요] 미분 추적 켜기
+    # 3. 최적화 변수 설정 (Gradient 켜기)
+    waypoints_param = best_waypoints.detach().clone()
+    waypoints_param.requires_grad = True
     
-    # 5. Optimizer 설정 (initial guess 이후는 optimize_direct와 동일)
-    optimizer = optim.Adam([waypoints_param], lr=0.05)
+    # [핵심] LBFGS Optimizer 사용
+    # lr=1.0이 기본값이며, 뉴턴법 기반이라 보통 1.0을 씁니다.
+    # max_iter: step() 한 번에 수행할 최대 반복 횟수
+    optimizer = optim.LBFGS([waypoints_param], 
+                            lr=1.0, 
+                            max_iter=20, 
+                            history_size=10, 
+                            line_search_fn="strong_wolfe") # Line Search 필수
+
+    # 4. 최적화 루프 (LBFGS는 closure 함수가 필요함)
+    loss_history = [best_loss]
+    iteration_count = [0]  # closure 내에서 iteration 추적용
     
-    # 6. 최적화 루프 (Optimization Loop)
-    iterations = 200  # 최대 반복 횟수
-    loss_history = []
-    stop_threshold = 1e-4  # 손실이 이 값 아래로 떨어지면 조기 종료
-    
-    for i in range(iterations):
+    def closure():
         optimizer.zero_grad()
-        
-        # 물리 엔진 시뮬레이션
         loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
-        
         loss.backward()
-        optimizer.step()
-        
         loss_value = loss.item()
         loss_history.append(loss_value)
+        iteration_count[0] += 1
         
-        if (i + 1) % 20 == 0:
-            print(f"Iter [{i+1}/{iterations}] Loss: {loss_value:.6f}")
+        # 0~20 iteration: 매번 출력, 21번 이후: 10번마다 출력
+        if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
+            print(f"Iter [{iteration_count[0]}] Loss: {loss_value:.6f}")
         
-        # 조기 종료 조건
-        if loss_value < stop_threshold:
-            print(f"Loss {loss_value:.6f} < {stop_threshold:.6f}. Early stopping at iter {i+1}.")
-            break
-            
-    end_time = time.time()
-    print(f"Optimization Finished (NN init: {model_type}). Time: {end_time - start_time:.4f}s")
+        return loss
+
+    # LBFGS는 step() 한 번 호출에 내부적으로 여러 번 반복(iter)함
+    optimizer.step(closure)
     
-    # 결과 시각화
-    final_error = loss.item()
-    final_deg = np.rad2deg(np.sqrt(final_error))  # L1 Loss 가정 시 sqrt 불필요, L2면 필요
-    print(f"Final Error: {final_error:.6f} (approx {final_deg:.2f}°)")
+    end_time = time.time()
+    
+    # 결과 확인
+    final_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal).item()
+    final_deg = np.rad2deg(np.sqrt(final_loss)) if final_loss > 0 else 0.0 # sqrt for L2 loss assumption
+    
+    print(f"Optimization Finished (LBFGS). Time: {end_time - start_time:.4f}s")
+    print(f"Final Error: {final_loss:.10f}")
+    print(f"Iterations: {len(loss_history)}")
     
     # 궤적 생성 및 저장
     with torch.no_grad():
@@ -178,12 +164,9 @@ def main():
         plot_trajectory(
             q_traj[0],
             q_dot_traj[0],
-            f"NN-{model_type.upper()} Init Opt (Err: {final_error:.4f})",
-            os.path.join(save_dir, f"fixed_goal_traj_{model_type}.png"),
+            f"CVAE+LBFGS Opt (Err: {final_loss:.6f})",
+            os.path.join(save_dir, "cvae_lbfgs_traj.png"),
         )
-
 
 if __name__ == "__main__":
     main()
-
-
