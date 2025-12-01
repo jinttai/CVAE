@@ -7,17 +7,24 @@ import sys
 import csv
 
 # === 경로 설정 ===
-current_dir = os.path.dirname(os.path.abspath(__file__))                 # .../space_robot_planning_Rmat
-project_root = os.path.dirname(current_dir)                              # .../CVAE
+current_dir = os.path.dirname(os.path.abspath(__file__))      # .../space_robot_planning_Rmat
+project_root = os.path.dirname(current_dir)                   # .../CVAE
 
-sys.path.append(current_dir)                                             # space_robot_planning_Rmat 패키지
-sys.path.append(os.path.join(project_root))                              # space_robot_planning 패키지
+# 원본 프로젝트(src) 경로를 sys.path에 추가해 dynamics / models 모듈을 사용
+orig_src_dir = os.path.join(project_root, "space_robot_planning", "src")
+if orig_src_dir not in sys.path:
+    sys.path.append(orig_src_dir)
+
+# Rmat 전용 src 도 추가
+rmat_src_dir = os.path.join(current_dir, "src")
+if rmat_src_dir not in sys.path:
+    sys.path.append(rmat_src_dir)
 
 from torch.utils.tensorboard import SummaryWriter
 
-from space_robot_planning.src.models.cvae import CVAE
-from space_robot_planning_Rmat.src.training.physics_layer import PhysicsLayer
-from space_robot_planning.src.dynamics.urdf2robot_torch import urdf2robot
+from models.cvae import CVAE
+from training.physics_layer import PhysicsLayer   # Rmat 버전
+from dynamics.urdf2robot_torch import urdf2robot
 
 
 # --- 시각화 헬퍼 함수 ---

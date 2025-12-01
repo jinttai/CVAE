@@ -10,14 +10,19 @@ import csv
 current_dir = os.path.dirname(os.path.abspath(__file__))  # .../space_robot_planning_Rmat
 project_root = os.path.dirname(current_dir)               # .../CVAE
 
-sys.path.append(current_dir)                              # space_robot_planning_Rmat 패키지
-sys.path.append(project_root)                             # space_robot_planning 패키지
+orig_src_dir = os.path.join(project_root, "space_robot_planning", "src")
+if orig_src_dir not in sys.path:
+    sys.path.append(orig_src_dir)
+
+rmat_src_dir = os.path.join(current_dir, "src")
+if rmat_src_dir not in sys.path:
+    sys.path.append(rmat_src_dir)
 
 from torch.utils.tensorboard import SummaryWriter
 
-from space_robot_planning.src.models.cvae import MLP
-from space_robot_planning_Rmat.src.training.physics_layer import PhysicsLayer
-from space_robot_planning.src.dynamics.urdf2robot_torch import urdf2robot
+from models.cvae import MLP
+from training.physics_layer import PhysicsLayer   # Rmat 버전
+from dynamics.urdf2robot_torch import urdf2robot
 
 
 def plot_trajectory(q_traj, q_dot_traj, epoch):
