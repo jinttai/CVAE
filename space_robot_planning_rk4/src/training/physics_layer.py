@@ -5,20 +5,21 @@ import os
 from torch.func import vmap
 
 # -------------------------------------------------------------------------
-# [경로 설정] 프로젝트 루트를 sys.path에 추가하여 모듈 import 에러 방지
-#   - 이 rk4 버전은 독립적인 PhysicsLayer 구현을 가진다.
-#   - dynamics 는 space_robot_planning_rk4/src/dynamics 에서 로드.
+# [경로 설정] 프로젝트 / 워크스페이스 루트를 sys.path에 추가하여 import 에러 방지
+#   - Windows PowerShell에서 cwd가 space_robot_planning_rk4일 때도
+#     상위 워크스페이스(`<workspace_root>/CVAE/src`)의 `src.dynamics`를 찾을 수 있게 함.
 # -------------------------------------------------------------------------
-current_dir = os.path.dirname(os.path.abspath(__file__))  # src/training
-src_dir = os.path.dirname(current_dir)                    # src
-root_dir = os.path.dirname(src_dir)                       # space_robot_planning_rk4
+current_dir = os.path.dirname(os.path.abspath(__file__))   # .../space_robot_planning_rk4/src/training
+src_dir = os.path.dirname(current_dir)                     # .../space_robot_planning_rk4/src
+root_dir = os.path.dirname(src_dir)                        # .../space_robot_planning_rk4
+workspace_root = os.path.dirname(root_dir)                 # .../CVAE
 
-if src_dir not in sys.path:
-    sys.path.append(src_dir)
-if root_dir not in sys.path:
-    sys.path.append(root_dir)
+for p in (src_dir, root_dir, workspace_root):
+    if p not in sys.path:
+        sys.path.append(p)
 
-import src.dynamics.spart_functions_torch as spart
+# dynamics는 원본 프로젝트 패키지인 space_robot_planning 아래에서 가져온다.
+from space_robot_planning.src.dynamics import spart_functions_torch as spart
 
 
 class PhysicsLayer:
