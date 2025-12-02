@@ -3,23 +3,23 @@ import sys
 import os
 
 # -----------------------------------------------------------------------------
-# [경로 설정] 프로젝트 루트를 sys.path에 추가하여 모듈 import 에러 방지
+# [경로 설정] 프로젝트 루트 및 워크스페이스 루트를 sys.path에 추가
+#   - space_robot_planning/src/training/physics_layer.py 기준 구조:
+#       <workspace_root>/CVAE/
+#           src/...
+#           space_robot_planning/src/...
 # -----------------------------------------------------------------------------
-current_dir = os.path.dirname(os.path.abspath(__file__)) # src/training
-src_dir = os.path.dirname(current_dir)                 # src
-root_dir = os.path.dirname(src_dir)                    # space_robot_planning
+current_dir = os.path.dirname(os.path.abspath(__file__))  # .../space_robot_planning/src/training
+src_dir = os.path.dirname(current_dir)                    # .../space_robot_planning/src
+root_dir = os.path.dirname(src_dir)                       # .../space_robot_planning
+workspace_root = os.path.dirname(root_dir)                # .../CVAE (상위 워크스페이스)
 
-if src_dir not in sys.path:
-    sys.path.append(src_dir)
-if root_dir not in sys.path:
-    sys.path.append(root_dir)
+for p in (src_dir, root_dir, workspace_root):
+    if p not in sys.path:
+        sys.path.append(p)
 
-# dynamics 모듈 로드 (폴더 구조에 맞게 import)
-try:
-    import src.dynamics.spart_functions_torch as spart
-except ImportError:
-    # 만약 src가 루트로 잡혀있는 경우 대비
-    import src.dynamics.spart_functions_torch as spart
+# dynamics 모듈 로드 (워크스페이스 기준 src.dynamics)
+import src.dynamics.spart_functions_torch as spart
 
 from torch.func import vmap # [핵심] 자동 배칭(Auto-Batching)
 
