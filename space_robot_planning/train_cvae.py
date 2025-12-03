@@ -111,7 +111,7 @@ def main():
     
     # CPU에서 돌릴 때는 이 값을 작게 유지하세요
     BATCH_SIZE = 512        # (기존 32 -> 2)
-    TOTAL_TIME = 1.0      # (기존 5.0 -> 1.0)
+    TOTAL_TIME = 10.0       # 전체 trajectory 길이 10초
     NUM_EPOCHS = 15000
     
     # 2. 모델 및 물리 엔진 준비

@@ -174,7 +174,7 @@ def main():
     robot, _ = urdf2robot("assets/SC_ur10e.urdf", verbose_flag=False, device=device)
     
     # 3.14 (180도)로 범위를 넓혀서 최대한의 가능성을 탐색
-    physics = PhysicsLayer(robot, num_waypoints=3, total_time=1.0, device=device)
+    physics = PhysicsLayer(robot, num_waypoints=3, total_time=10.0, device=device)
     
     NUM_SAMPLES = 100000 
     RANGE = (-140.0 * np.pi / 180.0, 140.0 * np.pi / 180.0)

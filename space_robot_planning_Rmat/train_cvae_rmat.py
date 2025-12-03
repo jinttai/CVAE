@@ -123,7 +123,7 @@ def main():
     LATENT_DIM = 8
 
     BATCH_SIZE = 512
-    TOTAL_TIME = 1.0
+    TOTAL_TIME = 10.0
     NUM_EPOCHS = 10000
 
     # 2. 모델 및 물리 엔진 준비

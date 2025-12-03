@@ -55,7 +55,7 @@ def main():
 
     NUM_WAYPOINTS = 3
     OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
-    TOTAL_TIME = 1.0
+    TOTAL_TIME = 10.0
 
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 

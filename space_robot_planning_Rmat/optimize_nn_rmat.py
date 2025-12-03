@@ -177,7 +177,7 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
     return euler_traj
 
 
-def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time):
+def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time, target_euler=None):
     """
     joint trajectory는 PhysicsLayer.generate_trajectory의 3차 스플라인 결과를 그대로 사용하고,
     body orientation 궤적은 Euler angle 로 함께 plot.
@@ -185,6 +185,11 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     q_traj = q_traj.detach().cpu().numpy()
     q_dot_traj = q_dot_traj.detach().cpu().numpy()
     euler_traj = euler_traj.detach().cpu().numpy()  # [T, 3], rad
+
+    # Optional target Euler angle (single 3-vector, rad)
+    target_deg = None
+    if target_euler is not None:
+        target_deg = np.rad2deg(target_euler.detach().cpu().numpy())  # [3]
 
     num_steps = q_traj.shape[0]
     t = np.linspace(0.0, total_time, num_steps)
@@ -211,6 +216,8 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     labels = ["Yaw (Z)", "Pitch (Y)", "Roll (X)"]
     for i in range(3):
         axes[2].plot(t, euler_deg[:, i], label=labels[i])
+        if target_deg is not None:
+            axes[2].axhline(target_deg[i], linestyle="--", linewidth=1.5, label=f"Target {labels[i]}")
     axes[2].set_title("Body Orientation (Euler)")
     axes[2].set_xlabel("Time [s]")
     axes[2].set_ylabel("Angle [deg]")
@@ -260,7 +267,7 @@ def main():
     NUM_WAYPOINTS = 3
     OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
     LATENT_DIM = 8
-    TOTAL_TIME = 1.0  # 1초
+    TOTAL_TIME = 10.0  # 10초 trajectory
 
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
@@ -360,6 +367,10 @@ def main():
         q_dot_traj_single = q_dot_traj[0]
         euler_traj = compute_orientation_traj(physics, q_traj_single, q_dot_traj_single, q0_start[0])
 
+        # Target body orientation in Euler angles (rad)
+        R_goal = quat_to_rot(q0_goal[0])
+        target_euler = rot_to_euler(R_goal)
+
         plot_trajectory(
             q_traj_single,
             q_dot_traj_single,
@@ -367,6 +378,7 @@ def main():
             f"CVAE+LBFGS Rmat (Err: {final_loss:.6f})",
             os.path.join(save_dir, "cvae_lbfgs_traj_rmat.png"),
             TOTAL_TIME,
+            target_euler=target_euler,
         )
 
 

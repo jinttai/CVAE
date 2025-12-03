@@ -37,8 +37,8 @@ class PhysicsLayer:
         self.n_q = robot["n_q"]
         self.num_waypoints = num_waypoints
         self.total_time = total_time
-        # Simulation time step (fixed to 0.01s for finer resolution)
-        self.dt = 0.01
+        # Simulation time step (fixed to 0.1s)
+        self.dt = 0.1
         self.num_steps = int(total_time / self.dt)
         self.device = device
 
