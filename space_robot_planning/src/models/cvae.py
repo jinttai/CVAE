@@ -7,28 +7,64 @@ import math
 OUTPUT_MAX_DEG = 140.0
 OUTPUT_MAX_RAD = math.radians(OUTPUT_MAX_DEG)  # 약 2.4435 라디안
 
+
+class ResidualBlock(nn.Module):
+    """
+    ResNet-style residual block for fully connected layers
+    """
+    def __init__(self, hidden_dim):
+        super(ResidualBlock, self).__init__()
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.relu = nn.ReLU()
+        
+    def forward(self, x):
+        residual = x
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.fc2(out)
+        out = self.relu(out)
+        # Skip connection
+        out = out + residual
+        return out
+
+
 class MLP(nn.Module):
     """
-    [Baseline] Simple Deterministic Policy
+    [Baseline] Simple Deterministic Policy with ResNet structure
     Input: Condition (Start/Goal Base Pose) -> Output: Waypoints
     Output is limited to -140deg ~ 140deg using tanh activation
     """
-    def __init__(self, input_dim, output_dim, hidden_dim=128):
+    def __init__(self, input_dim, output_dim, hidden_dim=128, num_residual_blocks=2):
         super(MLP, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
-            nn.Tanh()
-        )
+        # Initial projection
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.relu = nn.ReLU()
+        
+        # Residual blocks
+        self.residual_blocks = nn.ModuleList([
+            ResidualBlock(hidden_dim) for _ in range(num_residual_blocks)
+        ])
+        
+        # Output projection
+        self.output_proj = nn.Linear(hidden_dim, output_dim)
+        self.tanh = nn.Tanh()
 
     def forward(self, condition):
+        # Initial projection
+        x = self.input_proj(condition)
+        x = self.relu(x)
+        
+        # Residual blocks
+        for res_block in self.residual_blocks:
+            x = res_block(x)
+        
+        # Output projection with tanh
+        x = self.output_proj(x)
+        x = self.tanh(x)
+        
         # tanh 출력 (-1 ~ 1)을 -140deg ~ 140deg 범위로 스케일링
-        return self.net(condition) * OUTPUT_MAX_RAD
+        return x * OUTPUT_MAX_RAD
 
 class CVAE(nn.Module):
     """
@@ -55,16 +91,19 @@ class CVAE(nn.Module):
         # --- Decoder (Inference / Generator) ---
         # Input: Condition + Latent z
         # Output is limited to -140deg ~ 140deg using tanh activation
-        self.decoder = nn.Sequential(
-            nn.Linear(condition_dim + latent_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
-            nn.Tanh()
-        )
+        # ResNet structure with residual blocks
+        self.decoder_input_proj = nn.Linear(condition_dim + latent_dim, hidden_dim)
+        self.decoder_relu = nn.ReLU()
+        
+        # Residual blocks for decoder
+        num_decoder_blocks = 2
+        self.decoder_residual_blocks = nn.ModuleList([
+            ResidualBlock(hidden_dim) for _ in range(num_decoder_blocks)
+        ])
+        
+        # Output projection
+        self.decoder_output_proj = nn.Linear(hidden_dim, output_dim)
+        self.decoder_tanh = nn.Tanh()
 
     def encode(self, condition, trajectory):
         x = torch.cat([condition, trajectory], dim=1)
@@ -78,8 +117,21 @@ class CVAE(nn.Module):
 
     def decode(self, condition, z):
         x = torch.cat([condition, z], dim=1)
+        
+        # Initial projection
+        x = self.decoder_input_proj(x)
+        x = self.decoder_relu(x)
+        
+        # Residual blocks
+        for res_block in self.decoder_residual_blocks:
+            x = res_block(x)
+        
+        # Output projection with tanh
+        x = self.decoder_output_proj(x)
+        x = self.decoder_tanh(x)
+        
         # tanh 출력 (-1 ~ 1)을 -140deg ~ 140deg 범위로 스케일링
-        return self.decoder(x) * OUTPUT_MAX_RAD
+        return x * OUTPUT_MAX_RAD
 
     def forward(self, condition, trajectory):
         # Forward pass for training (reconstruction)
