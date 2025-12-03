@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import os
 import sys
 import csv
+import math
 
 # 프로젝트 루트 경로 설정 (Import 에러 방지)
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +17,52 @@ from torch.utils.tensorboard import SummaryWriter
 from src.models.cvae import MLP
 from src.training.physics_layer import PhysicsLayer
 from src.dynamics.urdf2robot_torch import urdf2robot
+
+
+def euler_to_quaternion(roll, pitch, yaw):
+    """
+    Convert Euler angles (roll, pitch, yaw) to quaternion (x, y, z, w)
+    Using ZYX convention (yaw around Z, pitch around Y, roll around X)
+    """
+    # Half angles
+    cr = torch.cos(roll / 2)
+    sr = torch.sin(roll / 2)
+    cp = torch.cos(pitch / 2)
+    sp = torch.sin(pitch / 2)
+    cy = torch.cos(yaw / 2)
+    sy = torch.sin(yaw / 2)
+    
+    # Quaternion components
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+    qw = cr * cp * cy + sr * sp * sy
+    
+    return torch.stack([qx, qy, qz, qw], dim=-1)
+
+
+def generate_random_quaternion_from_euler(batch_size, max_angle_deg=10.0, device='cpu'):
+    """
+    Generate random quaternions from Euler angles within specified range
+    Args:
+        batch_size: Number of quaternions to generate
+        max_angle_deg: Maximum angle in degrees for each Euler angle (default: 10 degrees)
+        device: Device to create tensors on
+    Returns:
+        quaternions: [batch_size, 4] tensor of quaternions (x, y, z, w)
+    """
+    max_angle_rad = math.radians(max_angle_deg)
+    
+    # Generate random Euler angles in [-max_angle_deg, max_angle_deg]
+    # Using torch.rand to generate uniform distribution in [0, 1], then scale to [-max, max]
+    roll = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
+    pitch = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
+    yaw = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
+    
+    # Convert to quaternion
+    quaternions = euler_to_quaternion(roll, pitch, yaw)
+    
+    return quaternions
 
 # --- 시각화 헬퍼 함수 ---
 def plot_trajectory(q_traj, q_dot_traj, epoch):
@@ -92,8 +139,8 @@ def main():
         # --- Training Step ---
         # random start and goal quaternion
         q0_start = torch.tensor([[0., 0., 0., 1.]], device=device).repeat(BATCH_SIZE, 1)
-        q0_goal = torch.randn(BATCH_SIZE, 4, device=device)
-        q0_goal /= torch.norm(q0_goal, dim=1, keepdim=True)
+        # Generate random quaternions from Euler angles within ±10 degrees
+        q0_goal = generate_random_quaternion_from_euler(BATCH_SIZE, max_angle_deg=10.0, device=device)
         
         condition = torch.cat([q0_start, q0_goal], dim=1)
         
