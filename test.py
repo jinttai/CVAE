@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import time
 import math
+from torch.profiler import profile, record_function, ProfilerActivity
 
 # 프로젝트 내 모듈은 `src` 패키지를 통해 일관되게 import
 from src.training.physics_layer import PhysicsLayer   # Rmat 버전
@@ -52,7 +53,7 @@ def generate_random_goal(max_angle_deg: float = 40.0, device: str = "cpu") -> to
 
 
 def test_loss_calculation_time(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: torch.Tensor, 
-                                num_trials: int = 100) -> dict:
+                                num_trials: int = 100, use_profiler: bool = False) -> dict:
     """
     Test loss calculation time with random waypoints
     
@@ -61,6 +62,7 @@ def test_loss_calculation_time(physics: PhysicsLayer, q0_start: torch.Tensor, q0
         q0_start: Initial quaternion [1, 4]
         q0_goal: Goal quaternion [1, 4]
         num_trials: Number of trials to run
+        use_profiler: Whether to use PyTorch profiler
     
     Returns:
         Dictionary with timing statistics
@@ -73,21 +75,68 @@ def test_loss_calculation_time(physics: PhysicsLayer, q0_start: torch.Tensor, q0
     
     print(f"Running {num_trials} trials...")
     
-    for i in range(num_trials):
-        # Generate random waypoints
+    # Setup profiler activities based on device
+    activities = [ProfilerActivity.CPU]
+    if device == "cuda":
+        activities.append(ProfilerActivity.CUDA)
+    
+    # Warm up (not profiled)
+    print("Warming up...")
+    for _ in range(5):
         waypoints = torch.randn(1, OUTPUT_DIM, device=device, dtype=torch.float32)
+        _ = physics.calculate_loss(waypoints, q0_start, q0_goal)
+    
+    if use_profiler:
+        print("Running with profiler (this may take longer)...")
+        with profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True
+        ) as prof:
+            with record_function("loss_calculation_batch"):
+                for i in range(num_trials):
+                    # Generate random waypoints
+                    waypoints = torch.randn(1, OUTPUT_DIM, device=device, dtype=torch.float32)
+                    
+                    with record_function(f"trial_{i}"):
+                        # Measure loss calculation time
+                        start_time = time.time()
+                        loss = physics.calculate_loss(waypoints, q0_start, q0_goal)
+                        end_time = time.time()
+                        
+                        calc_time = end_time - start_time
+                        times.append(calc_time)
+                        losses.append(loss.item())
+                        
+                        if (i + 1) % 10 == 0:
+                            print(f"  Trial {i+1}/{num_trials}: Time = {calc_time:.6f}s, Loss = {loss.item():.6f}")
         
-        # Measure loss calculation time
-        start_time = time.time()
-        loss = physics.calculate_loss(waypoints, q0_start, q0_goal)
-        end_time = time.time()
+        # Export trace
+        trace_file = "trace.json"
+        prof.export_chrome_trace(trace_file)
+        print(f"\nProfiler trace saved to {trace_file}")
         
-        calc_time = end_time - start_time
-        times.append(calc_time)
-        losses.append(loss.item())
-        
-        if (i + 1) % 10 == 0:
-            print(f"  Trial {i+1}/{num_trials}: Time = {calc_time:.6f}s, Loss = {loss.item():.6f}")
+        # Print summary
+        print("\nProfiler Summary:")
+        print(prof.key_averages().table(sort_by="self_cuda_time_total" if device == "cuda" else "self_cpu_time_total", row_limit=20))
+    else:
+        # Regular timing without profiler
+        for i in range(num_trials):
+            # Generate random waypoints
+            waypoints = torch.randn(1, OUTPUT_DIM, device=device, dtype=torch.float32)
+            
+            # Measure loss calculation time
+            start_time = time.time()
+            loss = physics.calculate_loss(waypoints, q0_start, q0_goal)
+            end_time = time.time()
+            
+            calc_time = end_time - start_time
+            times.append(calc_time)
+            losses.append(loss.item())
+            
+            if (i + 1) % 10 == 0:
+                print(f"  Trial {i+1}/{num_trials}: Time = {calc_time:.6f}s, Loss = {loss.item():.6f}")
     
     # Calculate statistics
     times_array = np.array(times)
@@ -131,11 +180,12 @@ def main():
     print()
     
     # Test parameters
-    num_trials = 100
+    num_trials = 50
+    use_profiler = True  # Set to True to generate trace.json
     
     # Run test
     print("="*60)
-    stats = test_loss_calculation_time(physics, q0_start, q0_goal, num_trials)
+    stats = test_loss_calculation_time(physics, q0_start, q0_goal, num_trials, use_profiler=use_profiler)
     print("="*60)
     
     # Print results
