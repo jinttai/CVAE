@@ -54,14 +54,14 @@ def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None
 
 def optimize_zero_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: torch.Tensor) -> float:
     """
-    Zero initialization + LBFGS optimization
+    Random initialization + LBFGS optimization
     Returns: calculation time in seconds
     """
     OUTPUT_DIM = physics.num_waypoints * physics.n_q
     device = physics.device
     
-    # Zero initialization
-    waypoints_param = torch.zeros(1, OUTPUT_DIM, device=device, dtype=torch.float32)
+    # Random initialization (randn)
+    waypoints_param = torch.randn(1, OUTPUT_DIM, device=device, dtype=torch.float32)
     waypoints_param.requires_grad = True
 
     optimizer = optim.LBFGS(
@@ -84,43 +84,6 @@ def optimize_zero_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: 
     # Measure only optimization time
     opt_start = time.time()
     optimizer.step(closure)
-    opt_end = time.time()
-    
-    return opt_end - opt_start
-
-
-def optimize_zero_adamw(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: torch.Tensor) -> float:
-    """
-    Zero initialization + AdamW optimization
-    Returns: calculation time in seconds
-    """
-    OUTPUT_DIM = physics.num_waypoints * physics.n_q
-    device = physics.device
-    
-    # Zero initialization
-    waypoints_param = torch.zeros(1, OUTPUT_DIM, device=device, dtype=torch.float32)
-    waypoints_param.requires_grad = True
-
-    optimizer = optim.AdamW(
-        [waypoints_param],
-        lr=0.01,
-        weight_decay=1e-4,
-    )
-
-    max_iterations = 1000
-    stop_threshold = 1e-6
-
-    # Measure only optimization time
-    opt_start = time.time()
-    for iteration in range(max_iterations):
-        optimizer.zero_grad()
-        loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
-        loss.backward()
-        optimizer.step()
-
-        loss_value = loss.item()
-        if loss_value < stop_threshold:
-            break
     opt_end = time.time()
     
     return opt_end - opt_start
@@ -258,7 +221,7 @@ def generate_random_goal(max_angle_deg: float = 40.0, device: str = "cpu") -> to
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"=== Monte Carlo Benchmark Start on {device} ===")
-    print("Testing 4 optimization methods with random goals (40 deg limit)")
+    print("Testing 3 optimization methods with random goals (40 deg limit)")
     print("100 iterations per method\n")
 
     # Setup (done once, not included in timing)
@@ -305,7 +268,6 @@ def main():
     
     # Storage for timing results
     times_zero_lbfgs = []
-    times_zero_adamw = []
     times_mlp_lbfgs = []
     times_cvae_lbfgs = []
     
@@ -317,21 +279,14 @@ def main():
         if (i + 1) % 10 == 0:
             print(f"Progress: {i+1}/{num_iterations}")
         
-        # 1. Zero + LBFGS
+        # 1. Random + LBFGS
         try:
             t = optimize_zero_lbfgs(physics, q0_start, q0_goal)
             times_zero_lbfgs.append(t)
         except Exception as e:
-            print(f"Error in zero_lbfgs iteration {i+1}: {e}")
+            print(f"Error in random_lbfgs iteration {i+1}: {e}")
         
-        # 2. Zero + AdamW
-        try:
-            t = optimize_zero_adamw(physics, q0_start, q0_goal)
-            times_zero_adamw.append(t)
-        except Exception as e:
-            print(f"Error in zero_adamw iteration {i+1}: {e}")
-        
-        # 3. MLP + LBFGS
+        # 2. MLP + LBFGS
         if mlp_model is not None:
             try:
                 t = optimize_mlp_lbfgs(physics, q0_start, q0_goal, mlp_model)
@@ -339,7 +294,7 @@ def main():
             except Exception as e:
                 print(f"Error in mlp_lbfgs iteration {i+1}: {e}")
         
-        # 4. CVAE + LBFGS
+        # 3. CVAE + LBFGS
         if cvae_model is not None:
             try:
                 t = optimize_cvae_lbfgs(physics, q0_start, q0_goal, cvae_model)
@@ -363,22 +318,16 @@ def main():
         
         print(f"{name:20s}: Mean = {mean_time:.6f}s, Std = {std_time:.6f}s ({len(times)}/{num_iterations} successful)")
     
-    print_stats("Zero + LBFGS", times_zero_lbfgs)
-    print_stats("Zero + AdamW", times_zero_adamw)
+    print_stats("Random + LBFGS", times_zero_lbfgs)
     print_stats("MLP + LBFGS", times_mlp_lbfgs)
     print_stats("CVAE + LBFGS", times_cvae_lbfgs)
     
     # Save results to file
     results = {
-        "zero_lbfgs": {
+        "random_lbfgs": {
             "times": times_zero_lbfgs,
             "mean": np.mean(times_zero_lbfgs) if times_zero_lbfgs else None,
             "std": np.std(times_zero_lbfgs) if times_zero_lbfgs else None,
-        },
-        "zero_adamw": {
-            "times": times_zero_adamw,
-            "mean": np.mean(times_zero_adamw) if times_zero_adamw else None,
-            "std": np.std(times_zero_adamw) if times_zero_adamw else None,
         },
         "mlp_lbfgs": {
             "times": times_mlp_lbfgs,
@@ -406,9 +355,7 @@ def main():
         writer.writerow(["Method", "Iteration", "Time (s)"])
         
         for i, t in enumerate(times_zero_lbfgs):
-            writer.writerow(["Zero+LBFGS", i+1, t])
-        for i, t in enumerate(times_zero_adamw):
-            writer.writerow(["Zero+AdamW", i+1, t])
+            writer.writerow(["Random+LBFGS", i+1, t])
         for i, t in enumerate(times_mlp_lbfgs):
             writer.writerow(["MLP+LBFGS", i+1, t])
         for i, t in enumerate(times_cvae_lbfgs):
