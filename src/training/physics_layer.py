@@ -252,9 +252,12 @@ class PhysicsLayer:
 
     def simulate_single_rk4(self, q_traj, q_dot_traj, q0_init, q0_goal):
         """
-        [Evaluation 전용 Physics Engine with RK4 integration - Rotation Matrix Version]
-        각속도 wb로부터 회전행렬을 4차 Runge-Kutta로 적분하여 최종 자세 오차를 계산
+        [Evaluation 전용 Physics Engine with RK4 integration - Quaternion Version]
+        각속도 wb로부터 쿼터니언을 4차 Runge-Kutta로 적분하여 최종 자세 오차를 계산
         dt = 0.01초로 고정 (evaluation 전용)
+        
+        쿼터니언 미분 방정식: dq/dt = 0.5 * q ⊗ [0, wx, wy, wz]
+        RK4 방법으로 적분
         """
         dt_eval = 0.01  # Evaluation용 고정 dt
         num_steps_eval = int(self.total_time / dt_eval)
@@ -262,9 +265,15 @@ class PhysicsLayer:
         R0 = self.R0
         r0 = self.r0
 
-        # 초기/목표 자세를 회전행렬로 변환
-        R_curr = self._quat_to_rot(q0_init)
-        R_goal = self._quat_to_rot(q0_goal)
+        # 초기/목표 자세를 쿼터니언으로 유지
+        q_curr = q0_init.clone()  # [4] or [1, 4]
+        q_goal = q0_goal.clone()  # [4] or [1, 4]
+        
+        # 쿼터니언 정규화 헬퍼 함수
+        def normalize_quat(q):
+            """쿼터니언 정규화"""
+            norm = torch.linalg.norm(q)
+            return q / (norm + 1e-8)
 
         # 궤적을 더 세밀한 스텝으로 보간하기 위해 원본 궤적 인덱스 계산
         for t_eval in range(num_steps_eval):
@@ -287,28 +296,33 @@ class PhysicsLayer:
             rhs = -H0m @ qd
             H0_damped = H0 + 1e-6 * self.eye6
             u0_sol = torch.linalg.solve(H0_damped, rhs)
-            wb = u0_sol[:3]  # Angular Velocity part
+            wb = u0_sol[:3]  # Angular Velocity part [wx, wy, wz]
 
-            # --- 3. RK4 Integration for Rotation Matrix ---
-            # 회전행렬의 RK4: 각속도 wb에 대해 RK4를 적용
-            # 회전행렬의 경우, 각속도 wb가 시간에 따라 변하지 않으므로
-            # RK4는 단순히 dt를 더 작게 나누는 효과
-            # 하지만 더 정확한 구현을 위해 각 k_i의 회전을 독립적으로 계산
-            # k1: 현재 각속도로 dt만큼 회전
-            R_delta_k1 = self._rot_from_omega(wb, dt_eval)
+            # --- 3. RK4 Integration for Quaternion ---
+            # 쿼터니언 미분: dq/dt = quat_dot(q, w)
+            # RK4: k1, k2, k3, k4 계산
+            k1 = spart.quat_dot(q_curr, wb)
             
-            # k2, k3, k4: wb가 동일하므로 동일한 회전
-            # RK4 가중 평균: 회전행렬의 경우 각 k_i의 회전을 가중 평균
-            # 단순화: wb가 시간에 따라 변하지 않으므로, RK4는 dt를 더 작게 나누는 효과
-            # 따라서 단순히 dt_eval을 사용하여 회전행렬을 업데이트
-            R_delta = self._rot_from_omega(wb, dt_eval)
-            R_curr = R_curr @ R_delta
+            q_k2 = normalize_quat(q_curr + 0.5 * dt_eval * k1)
+            k2 = spart.quat_dot(q_k2, wb)
+            
+            q_k3 = normalize_quat(q_curr + 0.5 * dt_eval * k2)
+            k3 = spart.quat_dot(q_k3, wb)
+            
+            q_k4 = normalize_quat(q_curr + dt_eval * k3)
+            k4 = spart.quat_dot(q_k4, wb)
+            
+            # RK4 업데이트: q_new = q + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+            q_curr = normalize_quat(q_curr + (dt_eval / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4))
 
         # --- 4. Final Orientation Error ---
-        # tr(R) = 1 + 2cos(θ) 이므로, cos(θ) = (tr(R) - 1) / 2
+        # 쿼터니언 오차 계산: q_err = q_goal^-1 ⊗ q_curr
+        # 쿼터니언 곱셈을 회전행렬로 변환하여 계산
+        R_curr = self._quat_to_rot(q_curr)
+        R_goal = self._quat_to_rot(q_goal)
         R_err = R_goal.T @ R_curr
         trace = torch.clamp((torch.trace(R_err) - 1.0) / 2.0, -1.0 + 1e-7, 1.0 - 1e-7)
-        angle_error = torch.acos(trace)  # radians (회전행렬에서는 * 2.0 불필요)
+        angle_error = torch.acos(trace)  # radians
         return angle_error ** 2
 
     def calculate_loss(self, waypoints_flat, q0_init, q0_goal):
