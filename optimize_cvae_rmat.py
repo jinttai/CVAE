@@ -264,7 +264,7 @@ def main():
 
     q0_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
     # Fixed desired orientation: roll=15deg, pitch=15deg, yaw=-15deg (within angle limits)
-    roll_deg, pitch_deg, yaw_deg = 15.0, 15.0, -15.0
+    roll_deg, pitch_deg, yaw_deg = np.random.randint(0, 40), np.random.randint(0, 40), np.random.randint(0, 40)
     roll_rad = math.radians(roll_deg)
     pitch_rad = math.radians(pitch_deg)
     yaw_rad = math.radians(yaw_deg)
@@ -323,8 +323,6 @@ def main():
         [waypoints_param],
         max_iter=50,
         history_size=100,
-        tolerance_grad=1e-6,
-        tolerance_change=1e-6,
         line_search_fn="strong_wolfe"
     )
 

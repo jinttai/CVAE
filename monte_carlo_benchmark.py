@@ -68,8 +68,6 @@ def optimize_zero_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: 
         [waypoints_param],
         max_iter=50,
         history_size=100,
-        tolerance_grad=1e-6,
-        tolerance_change=1e-6,
         line_search_fn="strong_wolfe"
     )
 
@@ -117,8 +115,6 @@ def optimize_mlp_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: t
         [waypoints_param],
         max_iter=50,
         history_size=100,
-        tolerance_grad=1e-6,
-        tolerance_change=1e-6,
         line_search_fn="strong_wolfe"
     )
 
@@ -181,8 +177,6 @@ def optimize_cvae_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: 
         [waypoints_param],
         max_iter=50,
         history_size=100,
-        tolerance_grad=1e-6,
-        tolerance_change=1e-6,
         line_search_fn="strong_wolfe"
     )
 
@@ -284,11 +278,11 @@ def main():
             print(f"Progress: {i+1}/{num_iterations}")
         
         # 1. Random + LBFGS
-        # try:
-        #     t = optimize_zero_lbfgs(physics, q0_start, q0_goal)
-        #     times_zero_lbfgs.append(t)
-        # except Exception as e:
-        #     print(f"Error in random_lbfgs iteration {i+1}: {e}")
+        try:
+            t = optimize_zero_lbfgs(physics, q0_start, q0_goal)
+            times_zero_lbfgs.append(t)
+        except Exception as e:
+            print(f"Error in random_lbfgs iteration {i+1}: {e}")
         
         # 2. MLP + LBFGS
         if mlp_model is not None:
@@ -328,11 +322,11 @@ def main():
     
     # Save results to file
     results = {
-        # "random_lbfgs": {
-        #     "times": times_zero_lbfgs,
-        #     "mean": np.mean(times_zero_lbfgs) if times_zero_lbfgs else None,
-        #     "std": np.std(times_zero_lbfgs) if times_zero_lbfgs else None,
-        # },
+        "random_lbfgs": {
+            "times": times_zero_lbfgs,
+            "mean": np.mean(times_zero_lbfgs) if times_zero_lbfgs else None,
+            "std": np.std(times_zero_lbfgs) if times_zero_lbfgs else None,
+        },
         "mlp_lbfgs": {
             "times": times_mlp_lbfgs,
             "mean": np.mean(times_mlp_lbfgs) if times_mlp_lbfgs else None,
