@@ -7,11 +7,13 @@ import numpy as np
 import math
 
 # 프로젝트 내 모듈은 `src` 패키지를 통해 일관되게 import
-from src.models.cvae import CVAE, MLP
-from src.training.physics_layer import PhysicsLayer   # Rmat 버전
+from src.models.cvae import CVAE, MLP # MLP는 사용하지 않지만 원본 구조 유지를 위해 import
+from src.training.physics_layer import PhysicsLayer  # Rmat 버전
 from src.dynamics.urdf2robot_torch import urdf2robot
 import src.dynamics.spart_functions_torch as spart
 
+
+# === Utility Functions ===
 
 def euler_to_quaternion(roll, pitch, yaw):
     """
@@ -38,17 +40,10 @@ def euler_to_quaternion(roll, pitch, yaw):
 def generate_random_quaternion_from_euler(batch_size, max_angle_deg=30.0, device='cpu'):
     """
     Generate random quaternions from Euler angles within specified range
-    Args:
-        batch_size: Number of quaternions to generate
-        max_angle_deg: Maximum angle in degrees for each Euler angle (default: 10 degrees)
-        device: Device to create tensors on
-    Returns:
-        quaternions: [batch_size, 4] tensor of quaternions (x, y, z, w)
     """
     max_angle_rad = math.radians(max_angle_deg)
     
     # Generate random Euler angles in [-max_angle_deg, max_angle_deg]
-    # Using torch.rand to generate uniform distribution in [0, 1], then scale to [-max, max]
     roll = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
     pitch = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
     yaw = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
@@ -59,21 +54,31 @@ def generate_random_quaternion_from_euler(batch_size, max_angle_deg=30.0, device
     return quaternions
 
 
-# === Orientation & Trajectory Helpers ===
+# === Orientation & Trajectory Helpers (Rmat Physics) ===
+
 def quat_to_rot(q):
     """
     쿼터니언 q = [x, y, z, w] 를 회전행렬 R (3x3) 로 변환.
     """
-    x, y, z, w = q
+    # 쿼터니언이 배치(Batch) 차원을 가질 경우를 대비하여 dim=-1 기준으로 분리
+    if q.dim() > 1:
+        x, y, z, w = q.unbind(dim=-1)
+    else:
+        x, y, z, w = q
+    
     xx, yy, zz = x * x, y * y, z * z
     xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * z, w * y
+
+    # Note: wx, wy, wz 재계산 (w * x, w * y, w * z)
     wx, wy, wz = w * x, w * y, w * z
 
     R = torch.stack([
         torch.stack([1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)]),
         torch.stack([2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)]),
         torch.stack([2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)])
-    ])
+    ], dim=-1).reshape(3, 3) # 3x3 행렬로 최종 reshape
+
     return R
 
 
@@ -91,11 +96,16 @@ def skew(v):
 def rot_from_omega(wb, dt):
     device = wb.device
     dtype = wb.dtype
+    
+    # wb가 스칼라가 아닐 경우 linalg.norm은 스칼라를 반환해야 함
     theta = torch.linalg.norm(wb) * dt
 
+    # 특이점 방지를 위해 1e-12 더함
     axis = wb / (torch.linalg.norm(wb) + 1e-12)
     K = skew(axis)
     I = torch.eye(3, device=device, dtype=dtype)
+    
+    # Rodrigues' rotation formula
     R_delta = I + torch.sin(theta) * K + (1.0 - torch.cos(theta)) * (K @ K)
     return R_delta
 
@@ -123,14 +133,6 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
     """
     PhysicsLayer에서 사용하는 Rmat 동역학과 동일하게 body orientation 궤적을 적분하여
     각 스텝의 Euler angle (yaw, pitch, roll)을 반환.
-
-    Args:
-        physics: PhysicsLayer 인스턴스
-        q_traj: [num_steps, n_q]
-        q_dot_traj: [num_steps, n_q]
-        q0_init: [4]
-    Returns:
-        euler_traj: [num_steps, 3] (rad)
     """
     device = physics.device
     num_steps = physics.num_steps
@@ -141,21 +143,28 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
     R_curr = quat_to_rot(q0_init)
 
     eulers = []
+    # Note: spart.kinematics, spart.diff_kinematics 등은 robot 객체 내부의 텐서와
+    # qm, qd 텐서의 device가 일치해야 한다. (device=physics.device)
     for t in range(num_steps):
         qm = q_traj[t]
         qd = q_dot_traj[t]
 
+        # Rmat 동역학 함수 호출
         RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, physics.robot)
         Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, physics.robot)
         I0, Im = spart.inertia_projection(R0, RL, physics.robot)
         M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, physics.robot)
         H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, physics.robot)
 
+        # 궤적을 유지하기 위한 바디 프레임 모멘텀 계산
         rhs = -H0m @ qd
         H0_damped = H0 + 1e-6 * torch.eye(6, device=device)
         u0_sol = torch.linalg.solve(H0_damped, rhs)
+        
+        # 바디 각속도 (Body Angular Velocity)
         wb = u0_sol[:3]
 
+        # Rmat 적분
         R_delta = rot_from_omega(wb, physics.dt)
         R_curr = R_curr @ R_delta
 
@@ -165,16 +174,16 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
     return euler_traj
 
 
+# === Visualization and Load Helpers ===
+
 def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time, target_euler=None):
     """
-    joint trajectory는 PhysicsLayer.generate_trajectory의 3차 스플라인 결과를 그대로 사용하고,
-    body orientation 궤적은 Euler angle 로 함께 plot.
+    Joint trajectory 및 Body orientation 궤적을 Matplotlib으로 Plot하고 저장.
     """
     q_traj = q_traj.detach().cpu().numpy()
     q_dot_traj = q_dot_traj.detach().cpu().numpy()
     euler_traj = euler_traj.detach().cpu().numpy()  # [T, 3], rad
 
-    # Optional target Euler angle (single 3-vector, rad)
     target_deg = None
     if target_euler is not None:
         target_deg = np.rad2deg(target_euler.detach().cpu().numpy())  # [3]
@@ -205,8 +214,8 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     for i in range(3):
         axes[2].plot(t, euler_deg[:, i], label=labels[i])
         if target_deg is not None:
-            axes[2].axhline(target_deg[i], linestyle="--", linewidth=1.5, label=f"Target {labels[i]}")
-    axes[2].set_title("Body Orientation (Euler)")
+            axes[2].axhline(target_deg[i], color=axes[2].lines[-1].get_color(), linestyle="--", linewidth=1.5, label=f"Target {labels[i]}")
+    axes[2].set_title("Body Orientation (Euler, ZYX)")
     axes[2].set_xlabel("Time [s]")
     axes[2].set_ylabel("Angle [deg]")
     axes[2].grid(True)
@@ -220,8 +229,7 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
 
 def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None, device="cpu"):
     """
-    원본 프로젝트와 동일한 방식으로 CVAE/MLP를 로드하는 유틸 함수.
-    Rmat 버전도 동일한 인터페이스를 사용한다.
+    CVAE/MLP 모델 가중치를 로드하는 유틸 함수.
     """
     if model_class == CVAE:
         model = CVAE(input_dim, output_dim, latent_dim).to(device)
@@ -232,7 +240,6 @@ def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None
         raise FileNotFoundError(f"Weight file not found: {weights_path}")
 
     print(f"Loading weights from: {weights_path}")
-    # Rmat 버전에서는 구조 변경 가능성을 고려하여 strict=False 로딩
     state_dict = torch.load(weights_path, map_location=device)
     try:
         model.load_state_dict(state_dict)
@@ -244,30 +251,36 @@ def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None
     return model
 
 
+# === Main Execution ===
+
 def main():
+    # 1. 초기 설정 (CVAE Inference는 CUDA 사용)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"=== NN-based Initialization + LBFGS (Rmat Physics) Start on {device} ===")
 
+    # 로봇 로드 (CUDA용)
     robot, _ = urdf2robot("assets/SC_ur10e.urdf", verbose_flag=False, device=device)
 
-    # 파라미터 (원본 프로젝트 구조와 동일하게 정리)
+    # 파라미터
     COND_DIM = 8
     NUM_WAYPOINTS = 3
     OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
     LATENT_DIM = 8
     TOTAL_TIME = 10.0  # 10초 trajectory
 
-    physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
+    # CVAE Inference를 위한 PhysicsLayer (CUDA)
+    physics_cuda = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
     save_dir = "results_rmat/opt_nn_lbfgs"
     os.makedirs(save_dir, exist_ok=True)
 
+    # 고정된 시작 및 목표 자세 (CUDA 텐서)
     q0_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    # Fixed desired orientation: roll=15deg, pitch=15deg, yaw=-15deg (within angle limits)
-    roll_deg, pitch_deg, yaw_deg = 15.0, 15.0, -15.0
-    roll_rad = math.radians(roll_deg)
-    pitch_rad = math.radians(pitch_deg)
-    yaw_rad = math.radians(yaw_deg)
+    
+    # Fixed desired orientation: roll=15deg, pitch=15deg, yaw=-15deg
+    roll_rad = math.radians(15.0)
+    pitch_rad = math.radians(15.0)
+    yaw_rad = math.radians(-15.0)
     q0_goal = euler_to_quaternion(
         torch.tensor([roll_rad], device=device),
         torch.tensor([pitch_rad], device=device),
@@ -277,10 +290,9 @@ def main():
 
     print("\n--- [Task 1] Fixed Goal Optimization with CVAE Init (LBFGS, Rmat Physics) ---")
 
-    # 1. CVAE Inference (Warm Start)
-    inference_start = time.time() 
+    # 1. CVAE Inference (Warm Start) - CUDA에서 수행
+    inference_start = time.time()  
 
-    # Rmat 학습 스크립트(train_cvae_rmat.py)에서 저장한 가중치 경로와 동일하게 맞춤 
     cvae_weights_path = "weights/cvae_rmat_debug/v3.pth"
     cvae_model = load_model(
         CVAE,
@@ -288,7 +300,7 @@ def main():
         COND_DIM,
         OUTPUT_DIM,
         LATENT_DIM,
-        device,
+        device, # CUDA 모델 로드
     )
 
     with torch.no_grad():
@@ -296,10 +308,13 @@ def main():
         z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
         cond_batch = condition.repeat(num_samples, 1)
 
-        candidates = cvae_model.decode(cond_batch, z)
+        candidates = cvae_model.decode(cond_batch, z) # candidates: CUDA 텐서
 
-        q_traj, q_dot_traj = physics.generate_trajectory(candidates)
-        batch_sim_fn = torch.func.vmap(physics.simulate_single, in_dims=(0, 0, 0, 0))
+        # CUDA PhysicsLayer를 사용하여 손실 계산
+        q_traj, q_dot_traj = physics_cuda.generate_trajectory(candidates)
+        
+        # torch.func.vmap은 배치 연산을 효율적으로 처리 (CUDA에서 빠름)
+        batch_sim_fn = torch.func.vmap(physics_cuda.simulate_single, in_dims=(0, 0, 0, 0))
         losses = batch_sim_fn(
             q_traj,
             q_dot_traj,
@@ -308,17 +323,32 @@ def main():
         )
 
         best_idx = torch.argmin(losses)
-        best_waypoints = candidates[best_idx].unsqueeze(0).clone()
+        best_waypoints = candidates[best_idx].unsqueeze(0).clone() # CUDA 텐서
         best_loss = losses[best_idx].item()
 
     inference_end = time.time()
     print(f"[Rmat CVAE Init] Selected best of {num_samples} samples with loss {best_loss:.8f}")
 
-    # 2. LBFGS Refinement (Rmat PhysicsLayer 사용)
-    waypoints_param = best_waypoints.detach().clone()
-    waypoints_param.requires_grad = True
-    print(f"Initial waypoints: {waypoints_param}")
+    # =================================================================
+    # 2. LBFGS Refinement를 위해 CPU로 전환 (장치 전환)
+    # =================================================================
+    refinement_device = "cpu"
+    print(f"\n--- Switching Refinement to {refinement_device} ---")
 
+    # (A) Physics Layer 및 Robot 데이터를 CPU로 이동/재생성
+    robot_cpu, _ = urdf2robot("assets/SC_ur10e.urdf", verbose_flag=False, device=refinement_device)
+    physics_cpu = PhysicsLayer(robot_cpu, NUM_WAYPOINTS, TOTAL_TIME, refinement_device)
+    
+    # (B) 최적화에 사용될 텐서들을 CUDA -> CPU로 이동
+    waypoints_param = best_waypoints.detach().cpu().clone()
+    q0_start_cpu = q0_start.cpu()
+    q0_goal_cpu = q0_goal.cpu()
+
+    waypoints_param.requires_grad = True # CPU 텐서에 대해 gradient 설정
+    
+    print(f"Initial waypoints (on CPU): {waypoints_param}")
+
+    # (C) LBFGS 최적화 (CPU 텐서 사용)
     optimizer = optim.LBFGS(
         [waypoints_param],
         max_iter=50,
@@ -333,14 +363,15 @@ def main():
 
     def closure():
         optimizer.zero_grad()
-        loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
+        # physics_cpu 객체와 CPU 텐서들을 사용
+        loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu)
         loss.backward()
         loss_value = loss.item()
         loss_history.append(loss_value)
         iteration_count[0] += 1
 
         if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
-            print(f"[Rmat] Iter [{iteration_count[0]}] Loss: {loss_value:.6f}")
+            print(f"[Rmat CPU] Iter [{iteration_count[0]}] Loss: {loss_value:.6f}")
 
         return loss
 
@@ -348,39 +379,39 @@ def main():
     optimizer.step(closure)
     opt_end = time.time()
 
-    # 결과 확인 (Euler 기반 loss, Rmat 물리)
-    final_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal).item()
+    # 결과 확인 및 시각화 (CPU 텐서 사용)
+    final_loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu).item()
     final_deg = np.rad2deg(np.sqrt(final_loss)) if final_loss > 0 else 0.0
 
-    print(f"Inference Finished (Rmat CVAE warm start). Time: {inference_end - inference_start:.4f}s")
-    print(f"Optimization Finished (Rmat LBFGS). Time: {opt_end - opt_start:.4f}s")
+    print(f"\nInference Finished (Rmat CVAE warm start). Time: {inference_end - inference_start:.4f}s")
+    print(f"Optimization Finished (Rmat LBFGS, CPU). Time: {opt_end - opt_start:.4f}s")
     print(f"[Rmat] Final Error: {final_loss:.10f} ({final_deg:.4f}°)")
     print(f"[Rmat] Iterations: {len(loss_history)}")
-    print(f"Final waypoints: {waypoints_param}")
+    print(f"Final waypoints (on CPU): {waypoints_param}")
 
+    # 3. 최종 궤적 생성 및 저장 (CPU)
     with torch.no_grad():
-        q_traj, q_dot_traj = physics.generate_trajectory(waypoints_param)
+        # CPU PhysicsLayer를 사용하여 궤적 생성 (결과 텐서는 CPU에 있음)
+        q_traj, q_dot_traj = physics_cpu.generate_trajectory(waypoints_param)
         q_traj_single = q_traj[0]
         q_dot_traj_single = q_dot_traj[0]
-        euler_traj = compute_orientation_traj(physics, q_traj_single, q_dot_traj_single, q0_start[0])
+        
+        # compute_orientation_traj 함수 (CPU 텐서 사용)
+        euler_traj = compute_orientation_traj(physics_cpu, q_traj_single, q_dot_traj_single, q0_start_cpu[0])
 
-        # Target body orientation in Euler angles (rad)
-        R_goal = quat_to_rot(q0_goal[0])
+        # Target body orientation (q0_goal_cpu[0] 사용)
+        R_goal = quat_to_rot(q0_goal_cpu[0])
         target_euler = rot_to_euler(R_goal)
 
         # --------------------------------------------------------------
         # Debug: compare final vs desired orientation (quat + Euler)
         # --------------------------------------------------------------
-        final_euler = euler_traj[-1]                     # [3] (yaw, pitch, roll)
-        target_euler_vec = target_euler                  # [3] (yaw, pitch, roll)
+        final_euler = euler_traj[-1]              # [3] (yaw, pitch, roll)
+        target_euler_vec = target_euler           # [3] (yaw, pitch, roll)
 
-        # Convert to degrees for readability
         final_euler_deg = final_euler * 180.0 / math.pi
         target_euler_deg = target_euler_vec * 180.0 / math.pi
 
-        # Reconstruct quaternion from final Euler to check Euler<->quat consistency.
-        # NOTE: rot_to_euler returns [yaw, pitch, roll] (ZYX),
-        #       while euler_to_quaternion expects (roll, pitch, yaw).
         yaw_f, pitch_f, roll_f = final_euler[0], final_euler[1], final_euler[2]
         q_final = euler_to_quaternion(
             roll_f.unsqueeze(0),
@@ -389,19 +420,17 @@ def main():
         )  # [1, 4]
 
         print("\n=== Orientation Check (Rmat) ===")
-        print("Final Euler (rad)   [yaw, pitch, roll]:", final_euler)
-        print("Target Euler (rad)  [yaw, pitch, roll]:", target_euler_vec)
         print("Final Euler (deg)   [yaw, pitch, roll]:", final_euler_deg)
         print("Target Euler (deg)  [yaw, pitch, roll]:", target_euler_deg)
         print("Final quaternion (from Euler) :", q_final)
-        print("Target quaternion (q0_goal)   :", q0_goal)
+        print("Target quaternion (q0_goal)   :", q0_goal_cpu)
 
         plot_trajectory(
             q_traj_single,
             q_dot_traj_single,
             euler_traj,
             f"CVAE+LBFGS Rmat (Err: {final_loss:.6f})",
-            os.path.join(save_dir, "cvae_lbfgs_traj_rmat.png"),
+            os.path.join(save_dir, "cvae_lbfgs_traj_rmat_cpu_opt.png"),
             TOTAL_TIME,
             target_euler=target_euler,
         )
@@ -409,20 +438,22 @@ def main():
         # ------------------------------------------------------------------
         # Save data for external (e.g., MATLAB) plotting as CSV files
         # ------------------------------------------------------------------
-        dt = float(physics.dt)
+        dt = float(physics_cpu.dt)
         num_steps = q_traj_single.shape[0]
         t = np.linspace(0.0, TOTAL_TIME, num_steps)
 
-        q_traj_np = q_traj_single.detach().cpu().numpy()       # [T, n_q]
-        q_dot_np = q_dot_traj_single.detach().cpu().numpy()    # [T, n_q]
-        euler_np = euler_traj.detach().cpu().numpy()           # [T, 3] (rad)
-        waypoints_np = waypoints_param.detach().cpu().numpy()  # [1, W]
-        q0_start_np = q0_start.detach().cpu().numpy()          # [1, 4]
-        q0_goal_np = q0_goal.detach().cpu().numpy()            # [1, 4]
-        target_euler_np = target_euler.detach().cpu().numpy()  # [3] (rad)
+        q_traj_np = q_traj_single.detach().cpu().numpy()
+        q_dot_np = q_dot_traj_single.detach().cpu().numpy()
+        euler_np = euler_traj.detach().cpu().numpy()
+        waypoints_np = waypoints_param.detach().cpu().numpy()
+        q0_start_np = q0_start_cpu.detach().cpu().numpy()
+        q0_goal_np = q0_goal_cpu.detach().cpu().numpy()
+        target_euler_np = target_euler.detach().cpu().numpy()
 
-        # 1) Joint position trajectory: time + J1..Jn
-        n_q = robot["n_q"]
+        # CSV 파일 저장 로직 (이전 코드와 동일)
+        n_q = robot_cpu["n_q"]
+        
+        # 1) Joint position trajectory
         header_q = "t," + ",".join([f"J{i+1}" for i in range(n_q)])
         q_traj_mat = np.column_stack([t, q_traj_np])
         np.savetxt(
@@ -433,7 +464,7 @@ def main():
             comments="",
         )
 
-        # 2) Joint velocity trajectory: time + dJ1..dJn
+        # 2) Joint velocity trajectory
         header_qdot = "t," + ",".join([f"dJ{i+1}" for i in range(n_q)])
         q_dot_mat = np.column_stack([t, q_dot_np])
         np.savetxt(
@@ -445,7 +476,6 @@ def main():
         )
 
         # 3) Body orientation (Euler) and target orientation (rad)
-        #    Columns: t, yaw, pitch, roll, yaw_target, pitch_target, roll_target
         target_tile = np.tile(target_euler_np.reshape(1, 3), (num_steps, 1))
         body_mat = np.column_stack([t, euler_np, target_tile])
         header_body = "t,yaw,pitch,roll,yaw_target,pitch_target,roll_target"
@@ -467,7 +497,7 @@ def main():
             comments="",
         )
 
-        # 5) Start / goal quaternion (each as separate CSV)
+        # 5) Start / goal quaternion
         np.savetxt(
             os.path.join(save_dir, "q0_start.csv"),
             q0_start_np,
@@ -483,7 +513,7 @@ def main():
             comments="",
         )
 
-        # 6) Meta info (dt, total_time)
+        # 6) Meta info
         meta_path = os.path.join(save_dir, "meta.csv")
         with open(meta_path, "w") as f:
             f.write("dt,total_time\n")
@@ -494,5 +524,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
