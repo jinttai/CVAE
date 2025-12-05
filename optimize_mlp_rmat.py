@@ -300,10 +300,11 @@ def main():
 
     optimizer = optim.LBFGS(
         [waypoints_param],
-        lr=1.0,
-        max_iter=20,
-        history_size=10,
-        line_search_fn="strong_wolfe",
+        max_iter=50,
+        history_size=100,
+        tolerance_grad=1e-6,
+        tolerance_change=1e-6,
+        line_search_fn="strong_wolfe"
     )
 
     loss_history = [best_loss]

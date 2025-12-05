@@ -80,11 +80,15 @@ def test_loss_calculation_time(physics: PhysicsLayer, q0_start: torch.Tensor, q0
     if device == "cuda":
         activities.append(ProfilerActivity.CUDA)
     
-    # Warm up (not profiled)
-    print("Warming up...")
-    for _ in range(5):
+    # -------------------------------------------------------------------------
+    # Warm up (Critical for torch.compile)
+    # 컴파일된 함수는 첫 실행 때 컴파일 비용이 발생하므로 Warm-up이 필수입니다.
+    # -------------------------------------------------------------------------
+    print("Warming up (compilation happens here)...")
+    for i in range(5):
         waypoints = torch.randn(1, OUTPUT_DIM, device=device, dtype=torch.float32)
         _ = physics.calculate_loss(waypoints, q0_start, q0_goal)
+        # print(f"Warm-up {i+1}/5 done") # 컴파일 진행 상황 확인용
     
     if use_profiler:
         print("Running with profiler (this may take longer)...")
@@ -101,8 +105,13 @@ def test_loss_calculation_time(physics: PhysicsLayer, q0_start: torch.Tensor, q0
                     
                     with record_function(f"trial_{i}"):
                         # Measure loss calculation time
+                        # 비동기 실행인 GPU 시간을 정확히 측정하기 위해 synchronize 추가
+                        if device == "cuda": torch.cuda.synchronize()
                         start_time = time.time()
+                        
                         loss = physics.calculate_loss(waypoints, q0_start, q0_goal)
+                        
+                        if device == "cuda": torch.cuda.synchronize()
                         end_time = time.time()
                         
                         calc_time = end_time - start_time
@@ -127,8 +136,13 @@ def test_loss_calculation_time(physics: PhysicsLayer, q0_start: torch.Tensor, q0
             waypoints = torch.randn(1, OUTPUT_DIM, device=device, dtype=torch.float32)
             
             # Measure loss calculation time
+            # 정확한 측정을 위한 synchronize 추가
+            if device == "cuda": torch.cuda.synchronize()
             start_time = time.time()
+            
             loss = physics.calculate_loss(waypoints, q0_start, q0_goal)
+            
+            if device == "cuda": torch.cuda.synchronize()
             end_time = time.time()
             
             calc_time = end_time - start_time
@@ -159,7 +173,13 @@ def test_loss_calculation_time(physics: PhysicsLayer, q0_start: torch.Tensor, q0
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
     print(f"=== Loss Calculation Time Test on {device} ===")
+    
+    # [Optimization 1] MatMul Precision 설정 (GPU 사용 시 속도 향상)
+    if device == "cuda":
+        torch.set_float32_matmul_precision('high')
+        print("MatMul Precision set to 'high'")
     print()
     
     # Setup (done once, not included in timing)
@@ -170,6 +190,18 @@ def main():
     TOTAL_TIME = 10.0
     
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
+
+    # =========================================================================
+    # [Optimization 2] torch.compile 적용 (핵심)
+    # calculate_loss 메서드를 컴파일하여 Python Loop Overhead를 제거합니다.
+    # mode="reduce-overhead"는 작은 연산이 많은 현재 상황에 최적입니다.
+    # =========================================================================
+    if hasattr(torch, "compile"):
+        print("\n[INFO] Applying torch.compile(mode='reduce-overhead')...")
+        physics.calculate_loss = torch.compile(physics.calculate_loss, mode="reduce-overhead")
+    else:
+        print("\n[WARNING] torch.compile not available. Running in Eager mode.")
+
     
     q0_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
     
@@ -180,8 +212,8 @@ def main():
     print()
     
     # Test parameters
-    num_trials = 50
-    use_profiler = True  # Set to True to generate trace.json
+    num_trials = 20
+    use_profiler = False  # Set to True to generate trace.json
     
     # Run test
     print("="*60)

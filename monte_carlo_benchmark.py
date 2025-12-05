@@ -66,10 +66,11 @@ def optimize_zero_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: 
 
     optimizer = optim.LBFGS(
         [waypoints_param],
-        lr=1.0,
-        max_iter=20,
-        history_size=10,
-        line_search_fn="strong_wolfe",
+        max_iter=50,
+        history_size=100,
+        tolerance_grad=1e-6,
+        tolerance_change=1e-6,
+        line_search_fn="strong_wolfe"
     )
 
     iteration_count = [0]
@@ -114,10 +115,11 @@ def optimize_mlp_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: t
 
     optimizer = optim.LBFGS(
         [waypoints_param],
-        lr=1.0,
-        max_iter=20,
-        history_size=10,
-        line_search_fn="strong_wolfe",
+        max_iter=50,
+        history_size=100,
+        tolerance_grad=1e-6,
+        tolerance_change=1e-6,
+        line_search_fn="strong_wolfe"
     )
 
     iteration_count = [0]
@@ -153,7 +155,7 @@ def optimize_cvae_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: 
     
     # CVAE Inference (Warm Start)
     with torch.no_grad():
-        num_samples = 50
+        num_samples = 1000
         z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
         cond_batch = condition.repeat(num_samples, 1)
 
@@ -177,10 +179,11 @@ def optimize_cvae_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: 
 
     optimizer = optim.LBFGS(
         [waypoints_param],
-        lr=1.0,
-        max_iter=20,
-        history_size=10,
-        line_search_fn="strong_wolfe",
+        max_iter=50,
+        history_size=100,
+        tolerance_grad=1e-6,
+        tolerance_change=1e-6,
+        line_search_fn="strong_wolfe"
     )
 
     iteration_count = [0]
@@ -264,7 +267,7 @@ def main():
     print("\nStarting Monte Carlo simulation...\n")
     
     # Monte Carlo parameters
-    num_iterations = 100
+    num_iterations = 10
     max_angle_deg = 40.0
     
     # Storage for timing results

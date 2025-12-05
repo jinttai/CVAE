@@ -292,7 +292,7 @@ def main():
     )
 
     with torch.no_grad():
-        num_samples = 50
+        num_samples = 1000
         z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
         cond_batch = condition.repeat(num_samples, 1)
 
