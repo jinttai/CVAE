@@ -293,11 +293,26 @@ def main():
     inference_end = time.time()
     print(f"[Rmat MLP Init] Initial waypoints with loss {best_loss:.8f}")
 
-    # 2. LBFGS Refinement (Rmat PhysicsLayer 사용)
-    waypoints_param = best_waypoints.detach().clone()
-    waypoints_param.requires_grad = True
-    print(f"Initial waypoints: {waypoints_param}")
+    # =================================================================
+    # 2. LBFGS Refinement를 위해 CPU로 전환 (장치 전환)
+    # =================================================================
+    refinement_device = "cpu"
+    print(f"\n--- Switching Refinement to {refinement_device} ---")
 
+    # (A) Physics Layer 및 Robot 데이터를 CPU로 이동/재생성
+    robot_cpu, _ = urdf2robot("assets/SC_ur10e.urdf", verbose_flag=False, device=refinement_device)
+    physics_cpu = PhysicsLayer(robot_cpu, NUM_WAYPOINTS, TOTAL_TIME, refinement_device)
+    
+    # (B) 최적화에 사용될 텐서들을 CUDA -> CPU로 이동
+    waypoints_param = best_waypoints.detach().cpu().clone()
+    q0_start_cpu = q0_start.cpu()
+    q0_goal_cpu = q0_goal.cpu()
+
+    waypoints_param.requires_grad = True  # CPU 텐서에 대해 gradient 설정
+    
+    print(f"Initial waypoints (on CPU): {waypoints_param}")
+
+    # (C) LBFGS 최적화 (CPU 텐서 사용)
     optimizer = optim.LBFGS(
         [waypoints_param],
         max_iter=50,
@@ -312,7 +327,7 @@ def main():
 
     def closure():
         optimizer.zero_grad()
-        loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
+        loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu)
         loss.backward()
         loss_value = loss.item()
         loss_history.append(loss_value)
@@ -328,7 +343,7 @@ def main():
     opt_end = time.time()
 
     # 결과 확인 (Euler 기반 loss, Rmat 물리)
-    final_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal).item()
+    final_loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu).item()
     final_deg = np.rad2deg(np.sqrt(final_loss)) if final_loss > 0 else 0.0
 
     print(f"Inference Finished (Rmat MLP warm start). Time: {inference_end - inference_start:.4f}s")
@@ -338,13 +353,13 @@ def main():
     print(f"Final waypoints: {waypoints_param}")
 
     with torch.no_grad():
-        q_traj, q_dot_traj = physics.generate_trajectory(waypoints_param)
+        q_traj, q_dot_traj = physics_cpu.generate_trajectory(waypoints_param)
         q_traj_single = q_traj[0]
         q_dot_traj_single = q_dot_traj[0]
-        euler_traj = compute_orientation_traj(physics, q_traj_single, q_dot_traj_single, q0_start[0])
+        euler_traj = compute_orientation_traj(physics_cpu, q_traj_single, q_dot_traj_single, q0_start_cpu[0])
 
         # Target body orientation in Euler angles (rad)
-        R_goal = quat_to_rot(q0_goal[0])
+        R_goal = quat_to_rot(q0_goal_cpu[0])
         target_euler = rot_to_euler(R_goal)
 
         # --------------------------------------------------------------
@@ -373,7 +388,7 @@ def main():
         print("Final Euler (deg)   [yaw, pitch, roll]:", final_euler_deg)
         print("Target Euler (deg)  [yaw, pitch, roll]:", target_euler_deg)
         print("Final quaternion (from Euler) :", q_final)
-        print("Target quaternion (q0_goal)   :", q0_goal)
+        print("Target quaternion (q0_goal)   :", q0_goal_cpu)
 
         plot_trajectory(
             q_traj_single,
@@ -388,7 +403,7 @@ def main():
         # ------------------------------------------------------------------
         # Save data for external (e.g., MATLAB) plotting as CSV files
         # ------------------------------------------------------------------
-        dt = float(physics.dt)
+        dt = float(physics_cpu.dt)
         num_steps = q_traj_single.shape[0]
         t = np.linspace(0.0, TOTAL_TIME, num_steps)
 
@@ -396,8 +411,8 @@ def main():
         q_dot_np = q_dot_traj_single.detach().cpu().numpy()    # [T, n_q]
         euler_np = euler_traj.detach().cpu().numpy()           # [T, 3] (rad)
         waypoints_np = waypoints_param.detach().cpu().numpy()  # [1, W]
-        q0_start_np = q0_start.detach().cpu().numpy()          # [1, 4]
-        q0_goal_np = q0_goal.detach().cpu().numpy()            # [1, 4]
+        q0_start_np = q0_start_cpu.detach().cpu().numpy()          # [1, 4]
+        q0_goal_np = q0_goal_cpu.detach().cpu().numpy()            # [1, 4]
         target_euler_np = target_euler.detach().cpu().numpy()  # [3] (rad)
 
         # 1) Joint position trajectory: time + J1..Jn

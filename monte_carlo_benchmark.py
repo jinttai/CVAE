@@ -105,12 +105,21 @@ def optimize_mlp_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: t
     # Measure time from MLP inference to end of optimization
     opt_start = time.time()
     
-    # MLP Inference (Warm Start)
+    # MLP Inference (Warm Start) - CUDA에서 수행
     with torch.no_grad():
         best_waypoints = mlp_model(condition)
 
-    # LBFGS Refinement
-    waypoints_param = best_waypoints.detach().clone()
+    # LBFGS Refinement를 위해 CPU로 전환
+    refinement_device = "cpu"
+    
+    # Physics Layer 및 Robot 데이터를 CPU로 재생성
+    robot_cpu, _ = urdf2robot("assets/SC_ur10e.urdf", verbose_flag=False, device=refinement_device)
+    physics_cpu = PhysicsLayer(robot_cpu, physics.num_waypoints, physics.total_time, refinement_device)
+    
+    # 텐서들을 CPU로 이동
+    waypoints_param = best_waypoints.detach().cpu().clone()
+    q0_start_cpu = q0_start.cpu()
+    q0_goal_cpu = q0_goal.cpu()
     waypoints_param.requires_grad = True
 
     optimizer = optim.LBFGS(
@@ -126,7 +135,7 @@ def optimize_mlp_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: t
 
     def closure():
         optimizer.zero_grad()
-        loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
+        loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu)
         loss.backward()
         iteration_count[0] += 1
         return loss
@@ -173,8 +182,17 @@ def optimize_cvae_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: 
         best_idx = torch.argmin(losses)
         best_waypoints = candidates[best_idx].unsqueeze(0).clone()
 
-    # LBFGS Refinement
-    waypoints_param = best_waypoints.detach().clone()
+    # LBFGS Refinement를 위해 CPU로 전환
+    refinement_device = "cpu"
+    
+    # Physics Layer 및 Robot 데이터를 CPU로 재생성
+    robot_cpu, _ = urdf2robot("assets/SC_ur10e.urdf", verbose_flag=False, device=refinement_device)
+    physics_cpu = PhysicsLayer(robot_cpu, physics.num_waypoints, physics.total_time, refinement_device)
+    
+    # 텐서들을 CPU로 이동
+    waypoints_param = best_waypoints.detach().cpu().clone()
+    q0_start_cpu = q0_start.cpu()
+    q0_goal_cpu = q0_goal.cpu()
     waypoints_param.requires_grad = True
 
     optimizer = optim.LBFGS(
@@ -190,7 +208,7 @@ def optimize_cvae_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: 
 
     def closure():
         optimizer.zero_grad()
-        loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
+        loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu)
         loss.backward()
         iteration_count[0] += 1
         return loss
