@@ -54,7 +54,7 @@ def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None
 
 def optimize_zero_lbfgs(physics: PhysicsLayer, q0_start: torch.Tensor, q0_goal: torch.Tensor) -> float:
     """
-    Random initialization + LBFGS optimization
+    Pure LBFGS optimization (Zero/Random initialization)
     Returns: calculation time in seconds
     """
     OUTPUT_DIM = physics.num_waypoints * physics.n_q
@@ -219,8 +219,8 @@ def generate_random_goal(max_angle_deg: float = 40.0, device: str = "cpu") -> to
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"=== Monte Carlo Benchmark Start on {device} ===")
-    print("Testing 3 optimization methods with random goals (40 deg limit)")
-    print("100 iterations per method\n")
+    print("Testing optimization methods with random goals")
+    print("Each method runs sequentially with multiple iterations\n")
 
     # Setup (done once, not included in timing)
     robot, _ = urdf2robot("assets/SC_ur10e.urdf", verbose_flag=False, device=device)
@@ -264,41 +264,106 @@ def main():
     num_iterations = 10
     max_angle_deg = 30.0
     
+    # ===================================================================
+    # Generate and save goals (same goals for all methods)
+    # ===================================================================
+    print("="*60)
+    print("Generating random goals (same goals for all methods)")
+    print("="*60)
+    
+    goals = []
+    for i in range(num_iterations):
+        q0_goal = generate_random_goal(max_angle_deg, device)
+        goals.append(q0_goal)
+    
+    # Save goals to file
+    goals_np = torch.stack(goals).detach().cpu().numpy()  # [num_iterations, 1, 4]
+    goals_reshaped = goals_np.reshape(num_iterations, 4)  # [num_iterations, 4]
+    
+    import csv
+    goals_file = "monte_carlo_goals.csv"
+    with open(goals_file, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Iteration", "qx", "qy", "qz", "qw"])
+        for i, goal in enumerate(goals_reshaped):
+            writer.writerow([i+1, goal[0], goal[1], goal[2], goal[3]])
+    
+    print(f"Generated {num_iterations} goals and saved to {goals_file}\n")
+    
     # Storage for timing results
     times_zero_lbfgs = []
     times_mlp_lbfgs = []
     times_cvae_lbfgs = []
     
-    # Run Monte Carlo
-    for i in range(num_iterations):
-        # Generate random goal
-        q0_goal = generate_random_goal(max_angle_deg, device)
+    # ===================================================================
+    # Method 1: Pure LBFGS (Zero/Random initialization)
+    # ===================================================================
+    # print("\n" + "="*60)
+    # print("Method 1: Pure LBFGS (Zero/Random Init)")
+    # print("="*60)
+    # print(f"{'Iter':<6} {'Time (s)':<15}")
+    # print("-" * 25)
+    
+    # for i in range(num_iterations):
+    #     # Use the same goal for all methods
+    #     q0_goal = goals[i]
         
-        if (i + 1) % 10 == 0:
-            print(f"Progress: {i+1}/{num_iterations}")
+    #     try:
+    #         t = optimize_zero_lbfgs(physics, q0_start, q0_goal)
+    #         times_zero_lbfgs.append(t)
+    #         print(f"{i+1:<6} {t:>13.6f}s")
+    #     except Exception as e:
+    #         print(f"Error in Pure LBFGS iteration {i+1}: {e}")
+    
+    # ===================================================================
+    # Method 2: MLP + LBFGS
+    # ===================================================================
+    if mlp_model is not None:
+        print("\n" + "="*60)
+        print("Method 2: MLP + LBFGS")
+        print("="*60)
+        print(f"{'Iter':<6} {'Time (s)':<15}")
+        print("-" * 25)
         
-        # 1. Random + LBFGS
-        try:
-            t = optimize_zero_lbfgs(physics, q0_start, q0_goal)
-            times_zero_lbfgs.append(t)
-        except Exception as e:
-            print(f"Error in random_lbfgs iteration {i+1}: {e}")
-        
-        # 2. MLP + LBFGS
-        if mlp_model is not None:
+        for i in range(num_iterations):
+            # Use the same goal for all methods
+            q0_goal = goals[i]
+            
             try:
                 t = optimize_mlp_lbfgs(physics, q0_start, q0_goal, mlp_model)
                 times_mlp_lbfgs.append(t)
+                print(f"{i+1:<6} {t:>13.6f}s")
             except Exception as e:
-                print(f"Error in mlp_lbfgs iteration {i+1}: {e}")
+                print(f"Error in MLP+LBFGS iteration {i+1}: {e}")
+    else:
+        print("\n" + "="*60)
+        print("Method 2: MLP + LBFGS (SKIPPED - Model not loaded)")
+        print("="*60)
+    
+    # ===================================================================
+    # Method 3: CVAE + LBFGS
+    # ===================================================================
+    if cvae_model is not None:
+        print("\n" + "="*60)
+        print("Method 3: CVAE + LBFGS")
+        print("="*60)
+        print(f"{'Iter':<6} {'Time (s)':<15}")
+        print("-" * 25)
         
-        # 3. CVAE + LBFGS
-        if cvae_model is not None:
+        for i in range(num_iterations):
+            # Use the same goal for all methods
+            q0_goal = goals[i]
+            
             try:
                 t = optimize_cvae_lbfgs(physics, q0_start, q0_goal, cvae_model)
                 times_cvae_lbfgs.append(t)
+                print(f"{i+1:<6} {t:>13.6f}s")
             except Exception as e:
-                print(f"Error in cvae_lbfgs iteration {i+1}: {e}")
+                print(f"Error in CVAE+LBFGS iteration {i+1}: {e}")
+    else:
+        print("\n" + "="*60)
+        print("Method 3: CVAE + LBFGS (SKIPPED - Model not loaded)")
+        print("="*60)
     
     # Calculate statistics
     print("\n" + "="*60)
@@ -316,13 +381,16 @@ def main():
         
         print(f"{name:20s}: Mean = {mean_time:.6f}s, Std = {std_time:.6f}s ({len(times)}/{num_iterations} successful)")
     
-    # print_stats("Random + LBFGS", times_zero_lbfgs)
+    print_stats("Pure LBFGS (Zero Init)", times_zero_lbfgs)
     print_stats("MLP + LBFGS", times_mlp_lbfgs)
     print_stats("CVAE + LBFGS", times_cvae_lbfgs)
     
     # Save results to file
     results = {
-        "random_lbfgs": {
+        "goals_file": goals_file,
+        "num_iterations": num_iterations,
+        "max_angle_deg": max_angle_deg,
+        "pure_lbfgs": {
             "times": times_zero_lbfgs,
             "mean": np.mean(times_zero_lbfgs) if times_zero_lbfgs else None,
             "std": np.std(times_zero_lbfgs) if times_zero_lbfgs else None,
@@ -346,20 +414,20 @@ def main():
     print(f"\nResults saved to {output_file}")
     
     # Also save as CSV for easy analysis
-    import csv
     csv_file = "monte_carlo_results.csv"
     with open(csv_file, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Method", "Iteration", "Time (s)"])
         
         for i, t in enumerate(times_zero_lbfgs):
-            writer.writerow(["Random+LBFGS", i+1, t])
+            writer.writerow(["Pure LBFGS", i+1, t])
         for i, t in enumerate(times_mlp_lbfgs):
             writer.writerow(["MLP+LBFGS", i+1, t])
         for i, t in enumerate(times_cvae_lbfgs):
             writer.writerow(["CVAE+LBFGS", i+1, t])
     
     print(f"Results saved to {csv_file}")
+    print(f"Goals saved to {goals_file}")
 
 
 if __name__ == "__main__":
