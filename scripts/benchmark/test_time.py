@@ -57,7 +57,8 @@ def generate_random_goal(max_angle_deg: float = 30.0, device: str = "cpu") -> to
 
 def test_simulate_single_timing(physics: PhysicsLayer, device: str = "cpu", num_runs: int = 1):
     """
-    Test timing for simulate_single function with detailed per-step and per-process timing
+    Test timing for simulate_single function with vectorized approach
+    (Same as physics_layer.py implementation - vectorized SPART calculations)
     
     Args:
         physics: PhysicsLayer instance
@@ -65,7 +66,7 @@ def test_simulate_single_timing(physics: PhysicsLayer, device: str = "cpu", num_
         num_runs: Number of runs to average over
     """
     print("\n" + "="*70)
-    print("Testing simulate_single Calculation Time")
+    print("Testing simulate_single Calculation Time (Vectorized)")
     print("="*70)
     
     # Generate test data
@@ -100,15 +101,10 @@ def test_simulate_single_timing(physics: PhysicsLayer, device: str = "cpu", num_
     # Storage for timing results
     all_total_times = []
     all_init_times = []
-    all_spart_times = []
-    all_constraint_times = []
-    all_rotation_times = []
+    all_spart_times = []  # Vectorized SPART + Constraint time
+    all_rotation_times = []  # Vectorized R_delta calculation time
+    all_constraint_times = []  # Cumulative product time (reused variable name)
     all_final_times = []
-    
-    # Detailed per-step timing (only for first run)
-    step_spart_times = []
-    step_constraint_times = []
-    step_rotation_times = []
     
     for run in range(num_runs):
         print(f"Run {run + 1}/{num_runs}:")
@@ -120,7 +116,7 @@ def test_simulate_single_timing(physics: PhysicsLayer, device: str = "cpu", num_
         init_start = time.time()
         R0 = physics.R0
         r0 = physics.r0
-        R_curr = physics._quat_to_rot(q0_start_single)
+        R_init = physics._quat_to_rot(q0_start_single)
         R_goal = physics._quat_to_rot(q0_goal_single)
         init_time = time.time() - init_start
         all_init_times.append(init_time)
@@ -128,64 +124,74 @@ def test_simulate_single_timing(physics: PhysicsLayer, device: str = "cpu", num_
         if run == 0:  # Only print details for first run
             print(f"  Initial quat-to-rot conversion: {init_time*1000:.4f} ms")
         
-        # Timing accumulators for each process
-        total_spart_time = 0.0
-        total_constraint_time = 0.0
-        total_rotation_time = 0.0
-        
-        # Import spart functions
+        # Vectorized approach: same as physics_layer.py
+        # Import spart functions and vmap
         import src.dynamics.spart_functions_torch as spart
+        from torch.func import vmap
         
-        for t in range(physics.num_steps):
-            qm = q_traj_single[t]
-            qd = q_dot_traj_single[t]
-            
-            # --- 1. SPART Dynamics Calculations ---
-            spart_start = time.time()
+        # --- 1. Vectorized SPART Dynamics Calculations ---
+        spart_start = time.time()
+        
+        def compute_wb_single_step(qm, qd):
+            """Single step의 wb 계산 (벡터화용)"""
             RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, physics.robot)
             Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, physics.robot)
             I0, Im = spart.inertia_projection(R0, RL, physics.robot)
             M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, physics.robot)
             H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, physics.robot)
-            spart_time = time.time() - spart_start
-            total_spart_time += spart_time
             
-            if run == 0:  # Store per-step timing only for first run
-                step_spart_times.append(spart_time)
-            
-            # --- 2. Non-holonomic Constraint Solver ---
-            constraint_start = time.time()
+            # Constraint solver
             rhs = -H0m @ qd
-            H0_damped = H0 + 1e-6 * physics.eye6
+            H0_damped = H0 + physics._damping_term
             u0_sol = torch.linalg.solve(H0_damped, rhs)
-            wb = u0_sol[:3]  # Angular Velocity part
-            constraint_time = time.time() - constraint_start
-            total_constraint_time += constraint_time
-            
-            if run == 0:  # Store per-step timing only for first run
-                step_constraint_times.append(constraint_time)
-            
-            # --- 3. Rotation Matrix Integration ---
-            rotation_start = time.time()
-            R_delta = physics._rot_from_omega(wb, physics.dt)
-            R_curr = R_curr @ R_delta
-            rotation_time = time.time() - rotation_start
-            total_rotation_time += rotation_time
-            
-            if run == 0:  # Store per-step timing only for first run
-                step_rotation_times.append(rotation_time)
-            
-            # Print timing for first few and last steps (only first run)
-            if run == 0 and (t < 3 or t == physics.num_steps - 1):
-                print(f"  Step {t:3d}: SPART={spart_time*1000:7.4f} ms, "
-                      f"Constraint={constraint_time*1000:7.4f} ms, "
-                      f"Rotation={rotation_time*1000:7.4f} ms")
+            wb = u0_sol[:3]
+            return wb
+        
+        # vmap으로 모든 step을 병렬 처리
+        batch_compute_wb = vmap(compute_wb_single_step, in_dims=(0, 0))
+        wb_all = batch_compute_wb(q_traj_single, q_dot_traj_single)  # [num_steps, 3]
+        
+        spart_time = time.time() - spart_start
+        all_spart_times.append(spart_time)
+        
+        if run == 0:
+            print(f"  Vectorized SPART + Constraint (all steps): {spart_time*1000:.4f} ms")
+        
+        # --- 2. Vectorized Rotation Matrix Calculation ---
+        rotation_start = time.time()
+        
+        # 모든 step의 R_delta를 한번에 계산
+        batch_rot_from_omega = vmap(physics._rot_from_omega, in_dims=(0, None))
+        R_delta_all = batch_rot_from_omega(wb_all, physics.dt)  # [num_steps, 3, 3]
+        
+        rotation_time = time.time() - rotation_start
+        all_rotation_times.append(rotation_time)
+        
+        if run == 0:
+            print(f"  Vectorized R_delta calculation (all steps): {rotation_time*1000:.4f} ms")
+        
+        # --- 3. Cumulative Product (sequential but optimized) ---
+        cumprod_start = time.time()
+        
+        # Cumulative product: R_final = R_init @ R_delta[0] @ R_delta[1] @ ... @ R_delta[n-1]
+        # 순서가 중요: 왼쪽부터 곱해야 함 (순차적 버전과 동일)
+        R_curr = R_init
+        for t in range(physics.num_steps):
+            R_curr = R_curr @ R_delta_all[t]
+        
+        cumprod_time = time.time() - cumprod_start
+        all_constraint_times.append(cumprod_time)  # Reuse for cumulative product time
+        
+        if run == 0:
+            print(f"  Cumulative product (sequential): {cumprod_time*1000:.4f} ms")
         
         # --- 4. Final Orientation Error ---
         final_start = time.time()
         R_err = R_goal.T @ R_curr
-        trace = torch.clamp((torch.trace(R_err) - 1.0) / 2.0, -1.0 + 1e-7, 1.0 - 1e-7)
-        angle_error = torch.acos(trace)
+        trace_val = torch.trace(R_err)
+        chordal_dist_sq = 3.0 - trace_val
+        epsilon = 1e-8
+        loss = torch.log(chordal_dist_sq + epsilon)
         q_final = physics._rot_to_quat(R_curr)
         final_time = time.time() - final_start
         all_final_times.append(final_time)
@@ -195,12 +201,8 @@ def test_simulate_single_timing(physics: PhysicsLayer, device: str = "cpu", num_
         
         total_time = time.time() - total_start
         all_total_times.append(total_time)
-        all_spart_times.append(total_spart_time)
-        all_constraint_times.append(total_constraint_time)
-        all_rotation_times.append(total_rotation_time)
         
         if run == 0:
-            loss = angle_error ** 2
             print(f"  Total time: {total_time*1000:.4f} ms")
             print(f"  Final loss: {loss.item():.6f}")
     
@@ -223,24 +225,110 @@ def test_simulate_single_timing(physics: PhysicsLayer, device: str = "cpu", num_
     
     print_stat("Total simulate_single time", all_total_times)
     print_stat("Initial quat-to-rot conversion", all_init_times)
-    print_stat("SPART dynamics (total)", all_spart_times)
-    print_stat("Constraint solver (total)", all_constraint_times)
-    print_stat("Rotation integration (total)", all_rotation_times)
+    print_stat("Vectorized SPART+Constraint (all steps)", all_spart_times)
+    print_stat("Vectorized R_delta calculation (all steps)", all_rotation_times)
+    print_stat("Cumulative product (sequential)", all_constraint_times)
     print_stat("Final error calculation", all_final_times)
     
-    # Per-step averages
-    if len(step_spart_times) > 0:
-        avg_spart_per_step = np.mean(step_spart_times) * 1000
-        avg_constraint_per_step = np.mean(step_constraint_times) * 1000
-        avg_rotation_per_step = np.mean(step_rotation_times) * 1000
+    # Calculate per-step averages (vectorized approach)
+    if len(all_spart_times) > 0 and physics.num_steps > 0:
+        avg_spart_per_step = (np.mean(all_spart_times) / physics.num_steps) * 1000
+        avg_rotation_per_step = (np.mean(all_rotation_times) / physics.num_steps) * 1000
+        avg_cumprod_per_step = (np.mean(all_constraint_times) / physics.num_steps) * 1000
         
-        print(f"\nPer-step averages (from first run):")
-        print(f"  SPART dynamics per step:     {avg_spart_per_step:8.4f} ms")
-        print(f"  Constraint solver per step:  {avg_constraint_per_step:8.4f} ms")
-        print(f"  Rotation integration per step: {avg_rotation_per_step:8.4f} ms")
-        print(f"  Total per step:              {(avg_spart_per_step + avg_constraint_per_step + avg_rotation_per_step):8.4f} ms")
+        print(f"\nPer-step averages (vectorized approach):")
+        print(f"  SPART+Constraint per step:   {avg_spart_per_step:8.4f} ms")
+        print(f"  R_delta calculation per step: {avg_rotation_per_step:8.4f} ms")
+        print(f"  Cumulative product per step:  {avg_cumprod_per_step:8.4f} ms")
+        print(f"  Total per step (avg):         {(avg_spart_per_step + avg_rotation_per_step + avg_cumprod_per_step):8.4f} ms")
     
     print("="*70 + "\n")
+
+
+def verify_vectorized_equivalence(physics: PhysicsLayer, device: str = "cpu"):
+    """
+    Verify that vectorized version produces same results as sequential version
+    """
+    print("\n" + "="*70)
+    print("Verifying Vectorized vs Sequential Equivalence")
+    print("="*70)
+    
+    # Generate test data
+    q0_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
+    q0_goal = generate_random_goal(30.0, device)
+    
+    OUTPUT_DIM = physics.num_waypoints * physics.n_q
+    waypoints_param = torch.randn(1, OUTPUT_DIM, device=device, dtype=torch.float32)
+    q_traj, q_dot_traj = physics.generate_trajectory(waypoints_param)
+    
+    q_traj_single = q_traj[0]
+    q_dot_traj_single = q_dot_traj[0]
+    q0_start_single = q0_start[0]
+    q0_goal_single = q0_goal[0]
+    
+    # Vectorized version (current implementation)
+    loss_vec, q_final_vec = physics.simulate_single(q_traj_single, q_dot_traj_single, 
+                                                      q0_start_single, q0_goal_single)
+    
+    # Sequential version (old implementation for comparison)
+    import src.dynamics.spart_functions_torch as spart
+    R0 = physics.R0
+    r0 = physics.r0
+    R_init = physics._quat_to_rot(q0_start_single)
+    R_goal = physics._quat_to_rot(q0_goal_single)
+    R_curr = R_init.clone()
+    
+    # Sequential computation
+    for t in range(physics.num_steps):
+        qm = q_traj_single[t]
+        qd = q_dot_traj_single[t]
+        
+        RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, physics.robot)
+        Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, physics.robot)
+        I0, Im = spart.inertia_projection(R0, RL, physics.robot)
+        M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, physics.robot)
+        H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, physics.robot)
+        
+        rhs = -H0m @ qd
+        H0_damped = H0 + physics._damping_term
+        u0_sol = torch.linalg.solve(H0_damped, rhs)
+        wb = u0_sol[:3]
+        
+        R_delta = physics._rot_from_omega(wb, physics.dt)
+        R_curr = R_curr @ R_delta
+    
+    # Final error (sequential)
+    R_err = R_goal.T @ R_curr
+    trace_val = torch.trace(R_err)
+    chordal_dist_sq = 3.0 - trace_val
+    epsilon = 1e-8
+    loss_seq = torch.log(chordal_dist_sq + epsilon)
+    q_final_seq = physics._rot_to_quat(R_curr)
+    
+    # Compare results
+    loss_diff = torch.abs(loss_vec - loss_seq).item()
+    q_final_diff = torch.norm(q_final_vec - q_final_seq).item()
+    
+    print(f"\nComparison Results:")
+    print(f"  Loss difference: {loss_diff:.2e}")
+    print(f"  Quaternion difference (L2 norm): {q_final_diff:.2e}")
+    print(f"  Vectorized loss: {loss_vec.item():.6f}")
+    print(f"  Sequential loss: {loss_seq.item():.6f}")
+    
+    # Tolerance check
+    loss_tol = 1e-5
+    quat_tol = 1e-4
+    
+    if loss_diff < loss_tol and q_final_diff < quat_tol:
+        print(f"\n✓ PASS: Results match within tolerance")
+        print(f"  Loss tolerance: {loss_tol:.2e}")
+        print(f"  Quaternion tolerance: {quat_tol:.2e}")
+        return True
+    else:
+        print(f"\n✗ FAIL: Results differ beyond tolerance")
+        print(f"  Loss tolerance: {loss_tol:.2e}")
+        print(f"  Quaternion tolerance: {quat_tol:.2e}")
+        return False
 
 
 def main():
@@ -267,6 +355,9 @@ def main():
     TOTAL_TIME = 10.0
     
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
+    
+    # First verify equivalence
+    verify_vectorized_equivalence(physics, device)
     
     # Run timing tests
     # Single run for detailed output
