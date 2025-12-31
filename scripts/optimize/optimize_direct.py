@@ -262,16 +262,10 @@ def main():
 
     optimizer = optim.LBFGS(
         [waypoints_param],
-<<<<<<< HEAD:optimize_cvae_rmat.py
+        lr=1.0,
         max_iter=50,
         history_size=100,
-        line_search_fn="strong_wolfe"
-=======
-        lr=1.0,
-        max_iter=20,
-        history_size=10,
         line_search_fn="strong_wolfe",
->>>>>>> 18d3f486ef4126e98bca5516b34d78d7b0a5e9af:scripts/optimize/optimize_direct.py
     )
 
     loss_history = []

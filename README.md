@@ -1,179 +1,351 @@
-# Space Robot Planning
+# Space Robot Planning with CVAE and MLP
 
-## Version 2 (Current)
+로봇 궤적 계획을 위한 Conditional Variational Autoencoder (CVAE) 및 Multi-Layer Perceptron (MLP) 기반 학습 시스템입니다.
 
-### 개요
-- **CVAE (Conditional Variational Autoencoder)** 모델과 **MLP (Baseline)** 모델을 사용한 로봇 궤적 계획 학습
-- 고정된 시작점에서 다양한 목표점으로의 궤적 생성 학습
+## 개요
 
-### 주요 변경사항 (v1 → v2)
-- **Trajectory 파라미터**: 5분절 → **4분절** (각 관절당 3개 파라미터)
-- **Spline Interpolation**: Linear → **3차 스플라인** (각 waypoint에서 미분=0)
-- **Evaluation**: 쿼터니언 RK4 적분 기반 최종 오차 평가
+이 프로젝트는 우주 로봇의 자세 제어를 위한 궤적 생성 모델을 학습합니다. CVAE와 MLP 두 가지 모델을 사용하여 고정된 시작점에서 다양한 목표 자세로의 궤적을 생성하며, 물리 시뮬레이션을 통한 손실 함수를 사용합니다.
 
-### 주요 특징
+---
 
-#### 학습 설정
-- **고정 시작점**: `q0_start = [0, 0, 0, 1]` (단위 쿼터니언)
-- **랜덤 목표점**: 매 epoch마다 랜덤하게 생성된 정규화된 쿼터니언
-- **물리 시뮬레이션**: PhysicsLayer를 통한 궤적 검증
-- **Validation**: 10 epoch마다 고정된 목표점에 대한 검증 수행
-
-#### CVAE 모델 설정
-- **Batch Size**: 512
-- **Epochs**: 15,000
-- **Latent Dimension**: 8
-- **Condition Dimension**: 8 (Start(4) + Goal(4))
-- **Waypoints**: 3 (4분절: 시작점 + 중간 3개 + 끝점)
-- **Total Time**: 1.0초
-- **Learning Rate**: 1e-3
-- **Optimizer**: Adam
-- **Hidden Dimension**: 256
-
-#### MLP 모델 설정
-- **Batch Size**: 256
-- **Epochs**: 15,000
-- **Condition Dimension**: 8 (Start(4) + Goal(4))
-- **Waypoints**: 3 (4분절)
-- **Total Time**: 1.0초
-- **Learning Rate**: 1e-3
-- **Optimizer**: Adam
-- **Hidden Dimension**: 128
-
-### Trajectory Generation (v2)
-
-#### 4분절 3차 스플라인
-- **구조**: 시작점(0) + 중간 waypoint 3개 + 끝점(0) = 총 5개 점으로 4분절 구성
-- **3차 Hermite 스플라인**: 각 분절에서 `q(t) = q_start + (q_end - q_start) * t² * (3 - 2*t)`
-- **속도**: `q'(t) = (q_end - q_start) * 6*t*(1-t)`
-- **특징**: 각 waypoint에서 미분이 0이 되어 부드러운 궤적 보장
-
-### 저장 파일
-
-#### 학습 데이터
-- **CSV 파일**: `plots/{model}_training_curve/v2.csv`
-  - 컬럼: `epoch`, `train_loss`, `epoch_duration`, `val_loss`
-- **플롯 이미지**: `plots/{model}_training_curve/v2.png`
-  - Train Loss와 Validation Loss 곡선
-- **모델 가중치**: 
-  - CVAE: `weights/cvae_debug/v2.pth`
-  - MLP: `weights/mlp_debug/v2.pth`
-
-#### TensorBoard 로그
-- **CVAE**: `runs/cvae_debug_v1/`
-- **MLP**: `runs/mlp_debug_v1/`
+## 주요 구성 요소
 
 ### 모델 아키텍처
 
-#### CVAE
-- **Encoder**: Condition + Trajectory → (μ, log σ²)
-- **Decoder**: Condition + Latent z → Waypoints
-- **Inference**: Decoder만 사용하여 랜덤 샘플링된 z로 궤적 생성
+#### CVAE (Conditional Variational Autoencoder)
+- **목적**: 조건부 확률적 궤적 생성
+- **입력**: Condition (Start(4) + Goal(4) = 8차원)
+- **Latent Dimension**: 8
+- **Hidden Dimension**: 256
+- **구조**:
+  - Encoder: Condition + Trajectory → (μ, log σ²)
+  - Decoder: Condition + Latent z → Waypoints (ResNet-style residual blocks)
+- **특징**: 랜덤 샘플링을 통한 다양한 궤적 생성 가능
 
-#### MLP (Baseline)
-- **구조**: 4층 MLP (128 hidden units)
-- **입력**: Condition (Start + Goal)
-- **출력**: Waypoints (결정론적)
+#### MLP (Baseline Model)
+- **목적**: 결정론적 궤적 생성 (Baseline)
+- **입력**: Condition (Start(4) + Goal(4) = 8차원)
+- **Hidden Dimension**: 128
+- **구조**: 4층 MLP (ResNet-style residual blocks, 2개)
+- **특징**: 동일 조건에서 항상 동일한 출력
 
-### Physics Simulation
+### 물리 시뮬레이션 (PhysicsLayer)
 
-#### 학습/최적화
-- **쿼터니언 Euler 적분**: `q_{k+1} = q_k + 0.5 * q_k * wb * dt`
-- **Non-holonomic Constraint**: SPART 동역학 기반 각속도 계산
+- **방법**: 회전행렬(Rotation Matrix) 기반 동역학
+- **적분**: R_{k+1} = R_k @ R_delta(wb, dt)
+- **동역학**: SPART (Space Robot Dynamics) 기반
+- **Non-holonomic Constraint**: 모멘텀 보존 제약 조건
+- **손실 함수**: Chordal distance (log scale)
+  ```
+  loss = log(3 - trace(R_goal^T @ R_final) + ε)
+  ```
 
-#### 평가 (Evaluation)
-- **쿼터니언 RK4 적분**: 4차 Runge-Kutta로 더 정확한 자세 추적
-- **최종 오차**: 각도 오차 `θ²` (쿼터니언 내적 기반)
+### 궤적 생성
 
-### 학습 프로세스
+- **방법**: 4분절 3차 Hermite 스플라인
+- **구조**: 시작점(0) + 중간 waypoint 3개 + 끝점(0) = 총 5개 점
+- **스플라인 함수**: 
+  - 위치: `q(t) = q_start + (q_end - q_start) * t² * (3 - 2*t)`
+  - 속도: `q'(t) = (q_end - q_start) * 6*t*(1-t)`
+- **특징**: 각 waypoint에서 미분이 0이 되어 부드러운 궤적 보장
+
+---
+
+## 학습 프로세스
+
+### CVAE 학습 (`scripts/train/train_cvae.py`)
+
+#### 하이퍼파라미터
+- **Batch Size**: 1024
+- **Epochs**: 2000
+- **Learning Rate**: 1e-3
+- **Optimizer**: Adam
+- **Total Time**: 10.0초
+- **Time Step (dt)**: 0.1초
+- **Num Steps**: 100 (total_time / dt)
+
+#### 데이터 생성
+- **시작 자세**: 고정 `[0, 0, 0, 1]` (단위 쿼터니언, Identity)
+- **목표 자세**: 매 epoch마다 랜덤 생성
+  - 방법: Axis-Angle 방식
+  - 범위: 랜덤 회전축 + 0~60도 각도
+  ```python
+  # 랜덤 회전축 생성 (Unit Vector)
+  rand_axis = torch.randn(batch_size, 3)
+  rand_axis = rand_axis / ||rand_axis||
+  
+  # 회전 각도 (0 ~ 60도)
+  rand_theta = torch.rand(batch_size, 1) * 60° (rad)
+  
+  # Axis-Angle → Quaternion
+  q = [sin(θ/2)*axis, cos(θ/2)]
+  ```
+
+#### 학습 과정
 1. 매 epoch마다 랜덤 목표점 생성
-2. CVAE: 랜덤 샘플링된 z로 waypoints 예측
-3. MLP: 조건부로 waypoints 예측
-4. PhysicsLayer를 통한 궤적 시뮬레이션 및 손실 계산
-5. 역전파 및 가중치 업데이트
-6. 10 epoch마다 고정 목표점에 대한 검증 및 시각화
+2. 랜덤 샘플링된 z로 waypoints 예측 (Decoder only)
+3. PhysicsLayer를 통한 궤적 시뮬레이션 및 손실 계산
+4. 역전파 및 가중치 업데이트
+5. 10 epoch마다 고정 목표점에 대한 검증 및 TensorBoard 시각화
 
+#### 저장 파일
+- **모델 가중치**: `outputs/weights/cvae_debug/v4.pth`
+- **학습 곡선 CSV**: `outputs/plots/cvae_training_curve/v4.csv`
+  - 컬럼: `epoch`, `train_loss`, `epoch_duration`, `val_loss`
+- **학습 곡선 이미지**: `outputs/plots/cvae_training_curve/v4.png`
+- **TensorBoard 로그**: `outputs/logs/cvae_v4/`
 
-**적분 방법**
-- 학습/최적화: Euler 적분 (`q_{k+1} = q_k + 0.5 * q_k * wb * dt`)
-- 평가: RK4 적분 (4차 Runge-Kutta)
+### MLP 학습 (`scripts/train/train_mlp.py`)
 
-#### 최적화 하이퍼파라미터
+#### 하이퍼파라미터
+- **Batch Size**: 1024
+- **Epochs**: 2000
+- **Learning Rate**: 1e-3
+- **Optimizer**: Adam
+- **Total Time**: 10.0초
+- **Time Step (dt)**: 0.1초
+- **Num Steps**: 100
 
-**직접 최적화** (`optimize_direct.py`)
-- `OPTIMIZER`: Adam
-- `LEARNING_RATE`: 0.05
-- `MAX_ITERATIONS`: 200
-- `EARLY_STOP_THRESHOLD`: 1e-4
-- `INIT_STD`: 0.1 (초기 waypoint 랜덤 초기화 표준편차)
+#### 데이터 생성
+- **시작 자세**: 고정 `[0, 0, 0, 1]`
+- **목표 자세**: CVAE와 동일한 방식 (Axis-Angle, 0~60도)
 
-**NN 기반 최적화** (`optimize_nn.py`)
-- `OPTIMIZER`: LBFGS
-- `LBFGS_LR`: 1.0
-- `LBFGS_MAX_ITER`: 20 (LBFGS 내부 반복 횟수)
-- `LBFGS_HISTORY_SIZE`: 10
-- `LBFGS_LINE_SEARCH`: "strong_wolfe"
-- `CVAE_NUM_SAMPLES`: 10 (CVAE inference 후 최적 샘플 선택)
-- `NUM_WAYPOINTS`: 3
-- `TOTAL_TIME`: 1.0초
+#### 학습 과정
+1. 매 epoch마다 랜덤 목표점 생성
+2. MLP로 waypoints 예측 (결정론적)
+3. PhysicsLayer를 통한 궤적 시뮬레이션 및 손실 계산
+4. 역전파 및 가중치 업데이트
+5. 10 epoch마다 고정 목표점에 대한 검증 및 TensorBoard 시각화
 
-#### 평가 하이퍼파라미터 (`evaluate.py`)
+#### 저장 파일
+- **모델 가중치**: `outputs/weights/mlp_debug/v4.pth`
+- **학습 곡선 CSV**: `outputs/plots/mlp_training_curve/v4.csv`
+- **학습 곡선 이미지**: `outputs/plots/mlp_training_curve/v4.png`
+- **TensorBoard 로그**: `outputs/logs/mlp_v4/`
 
-**CVAE 평가**
-- `NUM_SAMPLES`: 100 (평가용 샘플 수)
-- `LATENT_DIM`: 8
-- 평가 방법: RK4 적분 기반 최종 오차 계산
+---
 
-**MLP 평가**
-- 평가 방법: Single shot (결정론적)
-- 평가 방법: RK4 적분 기반 최종 오차 계산
+## 최적화 프로세스
 
-#### 궤적 생성 파라미터
+### CVAE 기반 최적화 (`scripts/optimize/optimize_cvae.py`)
 
-**3차 스플라인**
-- 분절 수: 4 (시작점 + 중간 3개 waypoint + 끝점)
-- 각 분절당 스텝 수: `seg_steps = num_steps // num_waypoints` (약 2-3 스텝)
-- 스플라인 함수: `q(t) = q_start + (q_end - q_start) * t² * (3 - 2*t)`
-- 속도 함수: `q'(t) = (q_end - q_start) * 6*t*(1-t)`
-- 경계 조건: 각 waypoint에서 미분 = 0
+#### 단계
+1. **Warm Start (CUDA)**:
+   - 학습된 CVAE 모델 로드
+   - 여러 개의 랜덤 latent z 샘플 생성 (기본 10개)
+   - 각 샘플에 대해 waypoints 생성 및 물리 시뮬레이션
+   - 손실이 가장 작은 샘플 선택
 
-#### 고정 테스트 케이스
+2. **Refinement (CPU)**:
+   - 선택된 waypoints를 CPU로 전환
+   - AdamW 또는 LBFGS 최적화
+   - 하이퍼파라미터:
+     - AdamW: `lr=1e-2`
+     - LBFGS: `lr=1.0`, `max_iter=20`, `history_size=10`, `line_search_fn="strong_wolfe"`
 
-**시작점**
-- `q0_start`: `[0, 0, 0, 1]` (단위 쿼터니언, 회전 없음)
+#### 특징
+- CUDA에서 빠른 inference 수행
+- CPU에서 안정적인 최적화 수행
+- 여러 샘플 중 최적 초기값 선택으로 더 나은 결과
 
-**목표점**
-- `q0_goal`: `[0, 0, 0.7071, 0.7071]` (Z축 기준 90도 회전)
-- 또는: `[π/100, π/100, π/100]` (Euler angles, 평가용)
+#### 저장 파일
+- **궤적 플롯**: `outputs/results/opt_nn_lbfgs/cvae_lbfgs_traj_cpu_opt.png`
+- **CSV 파일들**:
+  - `q_traj.csv`: Joint position trajectory
+  - `q_dot_traj.csv`: Joint velocity trajectory
+  - `body_orientation.csv`: Body orientation (Euler angles)
+  - `waypoints.csv`: 최적화된 waypoints
+  - `q0_start.csv`, `q0_goal.csv`: 시작/목표 쿼터니언
+  - `meta.csv`: 메타 정보 (dt, total_time)
 
-### 사용 방법
+### MLP 기반 최적화 (`scripts/optimize/optimize_mlp.py`)
+
+#### 단계
+1. **Warm Start (CUDA/CPU)**:
+   - 학습된 MLP 모델 로드
+   - 조건부로 waypoints 직접 예측 (결정론적)
+
+2. **Refinement (CPU)**:
+   - 예측된 waypoints를 CPU로 전환
+   - AdamW 또는 LBFGS 최적화 (CVAE와 동일한 하이퍼파라미터)
+
+#### 특징
+- 결정론적 예측 (동일 조건에서 항상 동일한 초기값)
+- 더 빠른 inference (샘플링 불필요)
+
+#### 저장 파일
+- **궤적 플롯**: `outputs/results/opt_nn_lbfgs/mlp_lbfgs_traj.png`
+- **CSV 파일들**: CVAE와 동일한 구조 (`*_mlp.csv` 접미사)
+
+### 직접 최적화 (`scripts/optimize/optimize_direct.py`)
+
+#### 방법
+- 랜덤 초기화된 waypoints에서 시작
+- LBFGS 최적화 직접 수행
+
+#### 하이퍼파라미터
+- **Optimizer**: LBFGS
+- **Learning Rate**: 1.0
+- **Max Iterations**: 50
+- **History Size**: 100
+- **Line Search**: "strong_wolfe"
+
+---
+
+## 실행 방법
+
+### 환경 설정
+
+```bash
+# 의존성 설치
+pip install -r requirements.txt
+```
+
+### 학습 실행
+
 ```bash
 # CVAE 학습
+cd scripts/train
 python train_cvae.py
 
 # MLP 학습
 python train_mlp.py
+```
 
-# 평가 (RK4 기반)
-python evaluate.py
+### 최적화 실행
 
-# 직접 최적화
+```bash
+cd scripts/optimize
+
+# CVAE 기반 최적화
+python optimize_cvae.py
+
+# MLP 기반 최적화
+python optimize_mlp.py
+
+# 직접 최적화 (랜덤 초기화)
 python optimize_direct.py
+```
 
-# CVAE warm start + LBFGS 최적화
-python optimize_nn.py
+### TensorBoard 실행
+
+```bash
+# CVAE 학습 곡선 확인
+tensorboard --logdir outputs/logs/cvae_v4
+
+# MLP 학습 곡선 확인
+tensorboard --logdir outputs/logs/mlp_v4
 ```
 
 ---
 
-## Version 1 (Legacy)
+## 주요 파라미터 요약
 
-### 주요 알고리즘
-- **5분절 Linear Spline**: 시작점 + 중간 waypoint 4개 + 끝점
-- **Linear Interpolation**: 각 분절에서 선형 보간
-- **쿼터니언 Euler 적분**: 물리 시뮬레이션
+### 학습 파라미터
 
-### 저장 파일
-- **CSV**: `plots/{model}_training_curve/v1.csv`
-- **플롯**: `plots/{model}_training_curve/v1.png`
-- **가중치**: `weights/{model}_debug/v1.pth`
+| 파라미터 | CVAE | MLP |
+|---------|------|-----|
+| Batch Size | 1024 | 1024 |
+| Epochs | 2000 | 2000 |
+| Learning Rate | 1e-3 | 1e-3 |
+| Optimizer | Adam | Adam |
+| Hidden Dim | 256 | 128 |
+| Latent Dim | 8 | - |
+| Condition Dim | 8 | 8 |
+| Waypoints | 3 | 3 |
+| Total Time | 10.0s | 10.0s |
+| Time Step (dt) | 0.1s | 0.1s |
+
+### 물리 시뮬레이션 파라미터
+
+| 파라미터 | 값 |
+|---------|-----|
+| 동역학 | SPART (Space Robot Dynamics) |
+| 적분 방법 | Rotation Matrix (R_{k+1} = R_k @ R_delta) |
+| 손실 함수 | Chordal distance (log scale) |
+| Damping | 1e-6 |
+| 궤적 생성 | 4분절 3차 Hermite 스플라인 |
+
+### 최적화 파라미터
+
+| 파라미터 | AdamW | LBFGS |
+|---------|-------|-------|
+| Learning Rate | 1e-2 | 1.0 |
+| Max Iterations | - | 20-50 |
+| History Size | - | 10-100 |
+| Line Search | - | "strong_wolfe" |
+| Device | CPU | CPU |
+
+---
+
+## 디렉토리 구조
+
+```
+CVAE/
+├── src/
+│   ├── models/
+│   │   └── cvae.py          # CVAE 및 MLP 모델 정의
+│   ├── training/
+│   │   └── physics_layer.py # 물리 시뮬레이션 레이어
+│   └── dynamics/            # SPART 동역학 모듈
+├── scripts/
+│   ├── train/
+│   │   ├── train_cvae.py    # CVAE 학습 스크립트
+│   │   └── train_mlp.py     # MLP 학습 스크립트
+│   └── optimize/
+│       ├── optimize_cvae.py # CVAE 기반 최적화
+│       ├── optimize_mlp.py  # MLP 기반 최적화
+│       └── optimize_direct.py # 직접 최적화
+├── outputs/
+│   ├── weights/             # 학습된 모델 가중치
+│   ├── plots/               # 학습 곡선 플롯
+│   ├── logs/                # TensorBoard 로그
+│   └── results/             # 최적화 결과 (CSV, 플롯)
+└── assets/                  # URDF 파일 및 메시
+```
+
+---
+
+## 기술적 세부사항
+
+### Rotation Matrix 기반 동역학
+
+기존 쿼터니언 적분 방식 대신 회전행렬을 사용하여 자세를 추적합니다:
+
+```python
+# 각 스텝마다
+wb = compute_body_angular_velocity(qm, qd)  # SPART 동역학
+R_delta = rot_from_omega(wb, dt)           # Rodrigues 공식
+R_curr = R_curr @ R_delta                  # 회전행렬 곱셈
+```
+
+### SPART 동역학 계산
+
+각 타임스텝에서:
+1. Forward kinematics (RJ, RL, rJ, rL, e, g)
+2. Differential kinematics (Bij, Bi0, P0, pm)
+3. Inertia projection (I0, Im)
+4. Composite body mass (M0_t, Mm_t)
+5. Generalized inertia matrix (H0, H0m)
+6. Non-holonomic constraint solver:
+   ```
+   H0 * u0 = -H0m * qd
+   wb = u0[:3]  # Body angular velocity
+   ```
+
+### 손실 함수
+
+Chordal distance 기반 손실:
+```
+R_err = R_goal^T @ R_final
+chordal_dist_sq = 3 - trace(R_err)
+loss = log(chordal_dist_sq + ε)
+```
+
+---
+
+## 참고사항
+
+- 학습 및 최적화는 주로 CUDA GPU를 사용하지만, 최종 정밀 최적화는 CPU에서 수행됩니다.
+- Joint limits는 모델에 자동으로 적용되어 출력이 관절 한계 내에 있도록 보장합니다.
+- 검증은 10 epoch마다 수행되며, TensorBoard에 궤적 시각화가 기록됩니다.
