@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-# 출력 범위: -140도 ~ 140도 (라디안으로 변환)
+# 기본 출력 범위 (Joint limits가 없을 경우 사용): -140도 ~ 140도
 OUTPUT_MAX_DEG = 140.0
-OUTPUT_MAX_RAD = math.radians(OUTPUT_MAX_DEG)  # 약 2.4435 라디안
+OUTPUT_MAX_RAD = math.radians(OUTPUT_MAX_DEG)
 
 
 class ResidualBlock(nn.Module):
@@ -33,9 +33,9 @@ class MLP(nn.Module):
     """
     [Baseline] Simple Deterministic Policy with ResNet structure
     Input: Condition (Start/Goal Base Pose) -> Output: Waypoints
-    Output is limited to -140deg ~ 140deg using tanh activation
+    Output is limited by joint_limits (if provided) or fixed range (-140~140 deg)
     """
-    def __init__(self, input_dim, output_dim, hidden_dim=128, num_residual_blocks=2):
+    def __init__(self, input_dim, output_dim, joint_limits=None, hidden_dim=128, num_residual_blocks=2):
         super(MLP, self).__init__()
         # Initial projection
         self.input_proj = nn.Linear(input_dim, hidden_dim)
@@ -50,6 +50,23 @@ class MLP(nn.Module):
         self.output_proj = nn.Linear(hidden_dim, output_dim)
         self.tanh = nn.Tanh()
 
+        # Joint limits 설정
+        if joint_limits is not None:
+            # joint_limits: [n_q, 2] (lower, upper)
+            # Register as buffer to save with state_dict and move to device automatically
+            self.register_buffer('joint_limits', joint_limits)
+            
+            # Pre-compute scale and mid for tanh scaling: [-1, 1] -> [lower, upper]
+            # val = mid + x * scale
+            lower = joint_limits[:, 0]
+            upper = joint_limits[:, 1]
+            self.register_buffer('scale', (upper - lower) / 2.0)
+            self.register_buffer('mid', (upper + lower) / 2.0)
+            self.n_q = joint_limits.shape[0]
+        else:
+            self.joint_limits = None
+            self.n_q = None
+
     def forward(self, condition):
         # Initial projection
         x = self.input_proj(condition)
@@ -63,15 +80,29 @@ class MLP(nn.Module):
         x = self.output_proj(x)
         x = self.tanh(x)
         
-        # tanh 출력 (-1 ~ 1)을 -140deg ~ 140deg 범위로 스케일링
-        return x * OUTPUT_MAX_RAD
+        # Scale output
+        if self.joint_limits is not None:
+            # Reshape for broadcasting: [Batch, Waypoints * Joints] -> [Batch, Waypoints, Joints]
+            batch_size = x.size(0)
+            x_reshaped = x.view(batch_size, -1, self.n_q)
+            
+            # Apply scaling: mid + x * scale
+            # scale, mid: [n_q] -> broadcast to [Batch, Waypoints, n_q]
+            x_scaled = self.mid + x_reshaped * self.scale
+            
+            # Flatten back
+            return x_scaled.view(batch_size, -1)
+        else:
+            # Default fixed scaling
+            return x * OUTPUT_MAX_RAD
+
 
 class CVAE(nn.Module):
     """
     [Proposed] Conditional Variational Autoencoder
     Generates diverse trajectories based on condition and latent z.
     """
-    def __init__(self, condition_dim, output_dim, latent_dim=8, hidden_dim=256):
+    def __init__(self, condition_dim, output_dim, latent_dim=8, joint_limits=None, hidden_dim=256):
         super(CVAE, self).__init__()
         self.condition_dim = condition_dim
         self.output_dim = output_dim
@@ -90,8 +121,6 @@ class CVAE(nn.Module):
 
         # --- Decoder (Inference / Generator) ---
         # Input: Condition + Latent z
-        # Output is limited to -140deg ~ 140deg using tanh activation
-        # ResNet structure with residual blocks
         self.decoder_input_proj = nn.Linear(condition_dim + latent_dim, hidden_dim)
         self.decoder_relu = nn.ReLU()
         
@@ -104,6 +133,20 @@ class CVAE(nn.Module):
         # Output projection
         self.decoder_output_proj = nn.Linear(hidden_dim, output_dim)
         self.decoder_tanh = nn.Tanh()
+
+        # Joint limits 설정
+        if joint_limits is not None:
+            # joint_limits: [n_q, 2] (lower, upper)
+            self.register_buffer('joint_limits', joint_limits)
+            
+            lower = joint_limits[:, 0]
+            upper = joint_limits[:, 1]
+            self.register_buffer('scale', (upper - lower) / 2.0)
+            self.register_buffer('mid', (upper + lower) / 2.0)
+            self.n_q = joint_limits.shape[0]
+        else:
+            self.joint_limits = None
+            self.n_q = None
 
     def encode(self, condition, trajectory):
         x = torch.cat([condition, trajectory], dim=1)
@@ -130,8 +173,20 @@ class CVAE(nn.Module):
         x = self.decoder_output_proj(x)
         x = self.decoder_tanh(x)
         
-        # tanh 출력 (-1 ~ 1)을 -140deg ~ 140deg 범위로 스케일링
-        return x * OUTPUT_MAX_RAD
+        # Scale output
+        if self.joint_limits is not None:
+            # Reshape for broadcasting: [Batch, Waypoints * Joints] -> [Batch, Waypoints, Joints]
+            batch_size = x.size(0)
+            x_reshaped = x.view(batch_size, -1, self.n_q)
+            
+            # Apply scaling: mid + x * scale
+            x_scaled = self.mid + x_reshaped * self.scale
+            
+            # Flatten back
+            return x_scaled.view(batch_size, -1)
+        else:
+            # Default fixed scaling
+            return x * OUTPUT_MAX_RAD
 
     def forward(self, condition, trajectory):
         # Forward pass for training (reconstruction)

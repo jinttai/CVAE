@@ -260,7 +260,8 @@ def urdf2robot(filename, verbose_flag=False, device='cpu', dtype=torch.float32):
             'parent_link': '',
             'child_link': '',
             'T': torch.eye(4, device=device, dtype=dtype),  # parent link frame
-            'axis': torch.tensor([0.0, 0.0, 0.0], device=device, dtype=dtype)
+            'axis': torch.tensor([0.0, 0.0, 0.0], device=device, dtype=dtype),
+            'limit': torch.tensor([-1e9, 1e9], device=device, dtype=dtype)
         }
         if joint_type_name in ['revolute', 'continuous']:
             joint_info['type'] = 1
@@ -296,6 +297,13 @@ def urdf2robot(filename, verbose_flag=False, device='cpu', dtype=torch.float32):
             elif joint_info['type'] != 0:
                 # A moving joint must have an axis
                 raise ValueError(f"Joint {joint_name} is moving but has no axis.")
+
+        # <limit>
+        limit_el = joint_xml.find('limit')
+        if limit_el is not None:
+            lower = float(limit_el.attrib.get('lower', -1e9))
+            upper = float(limit_el.attrib.get('upper', 1e9))
+            joint_info['limit'] = torch.tensor([lower, upper], device=device, dtype=dtype)
 
         # <parent>
         parent_el = joint_xml.find('parent')
@@ -370,6 +378,7 @@ def urdf2robot(filename, verbose_flag=False, device='cpu', dtype=torch.float32):
             'parent_link': parent_id,
             'child_link': link_id + 1,  # new link will get assigned
             'axis': jinfo['axis'],
+            'limit': jinfo['limit'],
             'T': jinfo['T']
         }
         # If it's revolute or prismatic, assign a q_id
@@ -423,6 +432,15 @@ def urdf2robot(filename, verbose_flag=False, device='cpu', dtype=torch.float32):
     robot['n_q'] = nq - 1
     if verbose_flag:
         print(f"Number of joint variables: {robot['n_q']}")
+
+    # Collect joint limits
+    # q_id is 1-based, we want 0-based index for limits array
+    joint_limits = torch.zeros((robot['n_q'], 2), device=device, dtype=dtype)
+    for j in robot['joints']:
+        qid = j['q_id']
+        if qid > 0:
+            joint_limits[qid - 1] = j['limit']
+    robot['joint_limits'] = joint_limits
 
     # Add connectivity map if needed
     branch, child, child_base = connectivity_map(robot)

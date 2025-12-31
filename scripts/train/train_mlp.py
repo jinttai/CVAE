@@ -49,7 +49,7 @@ def main():
     urdf_path = os.path.join(ROOT_DIR, "assets/SC_ur10e.urdf")
     robot, _ = urdf2robot(urdf_path, verbose_flag=False, device=device)
 
-    log_dir = os.path.join(ROOT_DIR, "outputs/logs/mlp_v3")
+    log_dir = os.path.join(ROOT_DIR, "outputs/logs/mlp_v4")
     writer = SummaryWriter(log_dir=log_dir)
 
     COND_DIM = 8
@@ -60,7 +60,7 @@ def main():
     TOTAL_TIME = 10.0
     NUM_EPOCHS = 2000
 
-    model = MLP(COND_DIM, OUTPUT_DIM).to(device)
+    model = MLP(COND_DIM, OUTPUT_DIM, joint_limits=robot['joint_limits']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
@@ -150,7 +150,7 @@ def main():
         csv_dir = os.path.join(plots_dir, "mlp_training_curve")
         if not os.path.exists(csv_dir):
             os.makedirs(csv_dir)
-        csv_path = os.path.join(csv_dir, "v3.csv")
+        csv_path = os.path.join(csv_dir, "v4.csv")
 
         with open(csv_path, "w", newline="") as csvfile:
             csv_writer = csv.writer(csvfile)
@@ -180,14 +180,14 @@ def main():
         save_dir = os.path.join(plots_dir, "mlp_training_curve")
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
-        save_path = os.path.join(save_dir, "v3.png")
+        save_path = os.path.join(save_dir, "v4.png")
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
 
     save_dir = os.path.join(ROOT_DIR, "outputs/weights/mlp_debug")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    save_path = os.path.join(save_dir, "v3.pth")
+    save_path = os.path.join(save_dir, "v4.pth")
     torch.save(model.state_dict(), save_path)
     writer.close()
 

@@ -223,12 +223,12 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     print(f"Saved plot to {save_path}")
 
 
-def load_model(weights_path, input_dim, output_dim, device="cpu"):
+def load_model(weights_path, input_dim, output_dim, device="cpu", joint_limits=None):
     """
     MLP 모델을 로드하는 유틸 함수.
     Rmat 버전도 동일한 인터페이스를 사용한다.
     """
-    model = MLP(input_dim, output_dim).to(device)
+    model = MLP(input_dim, output_dim, joint_limits=joint_limits).to(device)
 
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weight file not found: {weights_path}")
@@ -288,6 +288,7 @@ def main():
         COND_DIM,
         OUTPUT_DIM,
         device,
+        joint_limits=robot['joint_limits']
     )
 
     with torch.no_grad():

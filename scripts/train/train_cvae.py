@@ -104,7 +104,7 @@ def main():
     robot, _ = urdf2robot(urdf_path, verbose_flag=False, device=device)
 
     # TensorBoard Writer (로그 디렉토리)
-    log_dir = os.path.join(ROOT_DIR, "outputs/logs/cvae_v3")
+    log_dir = os.path.join(ROOT_DIR, "outputs/logs/cvae_v4")
     writer = SummaryWriter(log_dir=log_dir)
 
     # ==========================================
@@ -120,7 +120,7 @@ def main():
     NUM_EPOCHS = 2000
 
     # 2. 모델 및 물리 엔진 준비
-    model = CVAE(COND_DIM, OUTPUT_DIM, LATENT_DIM).to(device)
+    model = CVAE(COND_DIM, OUTPUT_DIM, LATENT_DIM, joint_limits=robot['joint_limits']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
@@ -221,7 +221,7 @@ def main():
         csv_dir = os.path.join(plots_dir, "cvae_training_curve")
         if not os.path.exists(csv_dir):
             os.makedirs(csv_dir)
-        csv_path = os.path.join(csv_dir, "v3.csv")
+        csv_path = os.path.join(csv_dir, "v4.csv")
 
         with open(csv_path, "w", newline="") as csvfile:
             csv_writer = csv.writer(csvfile)
@@ -251,7 +251,7 @@ def main():
         save_dir = os.path.join(plots_dir, "cvae_training_curve")
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
-        save_path = os.path.join(save_dir, "v3.png")
+        save_path = os.path.join(save_dir, "v4.png")
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
 
@@ -259,7 +259,7 @@ def main():
     save_dir = os.path.join(ROOT_DIR, "outputs/weights/cvae_debug")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    save_path = os.path.join(save_dir, "v3.pth")
+    save_path = os.path.join(save_dir, "v4.pth")
     torch.save(model.state_dict(), save_path)
     writer.close()
 

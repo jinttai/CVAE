@@ -32,6 +32,15 @@ class PhysicsLayer:
         self.r0 = torch.zeros(3, device=self.device)
         self.eye3 = torch.eye(3, device=self.device)
         self.eye6 = torch.eye(6, device=self.device)
+        
+        # Pre-computed constants to avoid recalculation
+        self._damping_value = 1e-6
+        self._damping_term = self._damping_value * self.eye6  # Pre-compute: 1e-6 * eye6
+        
+        # Pre-allocate buffers for constraint solver (reused each step)
+        # Note: These are single-use buffers, but pre-allocation helps with memory management
+        self._rhs_buffer = torch.zeros(6, device=self.device, dtype=torch.float32)
+        self._H0_damped_buffer = torch.zeros(6, 6, device=self.device, dtype=torch.float32)
 
     # ------------------------------------------------------------------
     # Trajectory Generation (3차 스플라인)
@@ -176,13 +185,15 @@ class PhysicsLayer:
         """
         각속도 wb 에 대해 dt 동안의 회전을 나타내는 회전행렬 R_delta 계산.
         Rodrigues 공식을 사용.
+        Optimized: minimize intermediate tensor allocations.
         """
         # vmap-safe 구현: 텐서 기반 분기 (no Python if on Tensor)
-        theta = torch.linalg.norm(wb) * dt  # scalar tensor
+        wb_norm = torch.linalg.norm(wb)
+        theta = wb_norm * dt  # scalar tensor
         eps = 1e-8
 
-        # 공통적으로 사용할 항들 계산
-        axis = wb / (torch.linalg.norm(wb) + 1e-12)
+        # 공통적으로 사용할 항들 계산 (reuse wb_norm)
+        axis = wb / (wb_norm + 1e-12)  # Reuse norm calculation
         K = self._skew(axis)
         I = self.eye3.to(dtype=wb.dtype)
 
@@ -190,10 +201,13 @@ class PhysicsLayer:
         cos_theta = torch.cos(theta)
 
         # 일반적인 Rodrigues 회전 (finite theta)
-        R_big = I + sin_theta * K + (1.0 - cos_theta) * (K @ K)
+        # Optimize: compute K @ K once and reuse
+        K_squared = K @ K
+        R_big = I + sin_theta * K + (1.0 - cos_theta) * K_squared
 
         # 매우 작은 회전: 1차 근사 (I + [w*dt]_x)
-        K_small = self._skew(wb * dt)
+        wb_dt = wb * dt  # Compute once
+        K_small = self._skew(wb_dt)
         R_small = I + K_small
 
         small = theta < eps
@@ -267,52 +281,73 @@ class PhysicsLayer:
     # ------------------------------------------------------------------
     def simulate_single(self, q_traj, q_dot_traj, q0_init, q0_goal):
         """
-        [Core Physics Engine - Rotation Matrix Version]
+        [Core Physics Engine - Rotation Matrix Version - Vectorized]
+        
+        Vectorized version: 모든 step의 rotation matrix를 한번에 계산하고
+        cumulative product로 최종 rotation을 구함 (for문 없이 구현)
 
         - 각 스텝에서 SPART 동역학을 통해 각속도 wb 를 구함
         - 회전행렬 R 를 R_{k+1} = R_k @ R_delta(wb, dt) 로 업데이트
         - 최종 R 와 목표 쿼터니언 q0_goal 을 회전행렬로 변환한 R_goal 간의
-          각도 오차를 반환 (angle_error^2)
+          각도 오차를 반환 (chordal distance with log)
         """
         # 기준 좌표계 (사전 생성된 텐서 사용)
         R0 = self.R0
         r0 = self.r0
 
         # 초기/목표 자세를 회전행렬로 변환
-        R_curr = self._quat_to_rot(q0_init)
+        R_init = self._quat_to_rot(q0_init)
         R_goal = self._quat_to_rot(q0_goal)
 
-        for t in range(self.num_steps):
-            qm = q_traj[t]
-            qd = q_dot_traj[t]
-
-            # --- 1. SPART Dynamics Calculations (기존과 동일) ---
+        # Vectorized: 모든 step의 wb를 한번에 계산
+        # q_traj: [num_steps, n_q], q_dot_traj: [num_steps, n_q]
+        
+        # 모든 step에 대해 SPART 동역학 계산 및 wb 계산
+        # vmap을 사용하여 각 step을 병렬 처리
+        def compute_wb_single_step(qm, qd):
+            """Single step의 wb 계산"""
+            # --- 1. SPART Dynamics Calculations ---
             RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, self.robot)
             Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, self.robot)
             I0, Im = spart.inertia_projection(R0, RL, self.robot)
             M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, self.robot)
             H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot)
 
-            # --- 2. Non-holonomic Constraint Solver --- 
+            # --- 2. Non-holonomic Constraint Solver ---
             rhs = -H0m @ qd
-            H0_damped = H0 + 1e-6 * self.eye6
+            H0_damped = H0 + self._damping_term
             u0_sol = torch.linalg.solve(H0_damped, rhs)
             wb = u0_sol[:3]  # Angular Velocity part
-
-            # --- 3. Rotation Matrix Integration ---
-            R_delta = self._rot_from_omega(wb, self.dt)
-            R_curr = R_curr @ R_delta
-
+            return wb
+        
+        # vmap으로 모든 step을 병렬 처리
+        batch_compute_wb = vmap(compute_wb_single_step, in_dims=(0, 0))
+        wb_all = batch_compute_wb(q_traj, q_dot_traj)  # [num_steps, 3]
+        
+        # 모든 step의 R_delta를 한번에 계산
+        batch_rot_from_omega = vmap(self._rot_from_omega, in_dims=(0, None))
+        R_delta_all = batch_rot_from_omega(wb_all, self.dt)  # [num_steps, 3, 3]
+        
+        # Cumulative product: R_final = R_init @ R_delta[0] @ R_delta[1] @ ... @ R_delta[n-1]
+        # 순서가 중요: 왼쪽부터 곱해야 함 (순차적 버전과 동일)
+        # R_curr = R_init @ R_delta[0] @ R_delta[1] @ ... @ R_delta[n-1]
+        R_curr = R_init
+        for t in range(self.num_steps):
+            R_curr = R_curr @ R_delta_all[t]
+        
         # --- 4. Final Orientation Error ---
-        # 상대 회전 행렬 R_err = R_goal^T * R_curr
-        # tr(R) = 1 + 2cos(θ) 이므로, cos(θ) = (tr(R) - 1) / 2
+        # Chordal distance (Frobenius norm) based loss
         R_err = R_goal.T @ R_curr
-        trace = torch.clamp((torch.trace(R_err) - 1.0) / 2.0, -1.0 + 1e-7, 1.0 - 1e-7)
-        angle_error = torch.acos(trace)  # radians (회전행렬에서는 * 2.0 불필요)
+        trace_val = torch.trace(R_err)
+        chordal_dist_sq = 3.0 - trace_val
+        
+        # Apply log for better numerical stability and gradient behavior
+        epsilon = 1e-8
+        loss = torch.log(chordal_dist_sq + epsilon)
         
         # Return final quaternion as well
         q_final = self._rot_to_quat(R_curr)
-        return angle_error ** 2, q_final
+        return loss, q_final
 
     def simulate_single_rk4(self, q_traj, q_dot_traj, q0_init, q0_goal):
         """
@@ -402,12 +437,19 @@ class PhysicsLayer:
             q_curr = normalize_quat(q_curr + (dt_eval / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4))
             current_time += dt_eval
 
-        # Final Error Calculation
+        # Final Error Calculation - Chordal distance (Frobenius norm) based loss
         R_curr = self._quat_to_rot(q_curr)
         R_goal = self._quat_to_rot(q_goal)
         R_err = R_goal.T @ R_curr
-        trace = torch.clamp((torch.trace(R_err) - 1.0) / 2.0, -1.0 + 1e-7, 1.0 - 1e-7)
-        return (torch.acos(trace) ** 2), q_curr
+        trace_val = torch.trace(R_err)
+        
+        # Chordal distance squared: 3 - trace(R_goal^T @ R_curr)
+        chordal_dist_sq = 3.0 - trace_val
+        
+        # Apply log for better numerical stability and gradient behavior
+        epsilon = 1e-8
+        loss = torch.log(chordal_dist_sq + epsilon)
+        return loss, q_curr
 
     def calculate_loss(self, waypoints_flat, q0_init, q0_goal):
         """

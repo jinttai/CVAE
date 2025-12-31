@@ -1,0 +1,21 @@
+# Core Dependencies
+torch>=2.0.0
+numpy>=1.21.0
+matplotlib>=3.5.0
+scipy>=1.7.0
+
+# Training and Logging
+tensorboard>=2.10.0
+
+# Configuration
+pyyaml>=6.0
+
+# Data Processing (optional, for some scripts)
+pandas>=1.3.0
+
+# Optional: MuJoCo Simulation (uncomment if needed)
+# mujoco>=2.3.0
+
+# Optional: CasADi for symbolic computation (uncomment if needed)
+# casadi>=3.5.0
+
