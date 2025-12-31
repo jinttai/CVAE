@@ -232,14 +232,14 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     print(f"Saved plot to {save_path}")
 
 
-def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None, device="cpu"):
+def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None, device="cpu", joint_limits=None):
     """
     CVAE/MLP 모델 가중치를 로드하는 유틸 함수.
     """
     if model_class == CVAE:
-        model = CVAE(input_dim, output_dim, latent_dim).to(device)
+        model = CVAE(input_dim, output_dim, latent_dim, joint_limits=joint_limits).to(device)
     else:
-        model = MLP(input_dim, output_dim).to(device)
+        model = MLP(input_dim, output_dim, joint_limits=joint_limits).to(device)
 
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weight file not found: {weights_path}")
@@ -307,6 +307,7 @@ def main():
         OUTPUT_DIM,
         LATENT_DIM,
         device, # CUDA 모델 로드
+        joint_limits=robot['joint_limits']
     )
 
     with torch.no_grad():

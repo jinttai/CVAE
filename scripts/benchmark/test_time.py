@@ -230,19 +230,6 @@ def test_simulate_single_timing(physics: PhysicsLayer, device: str = "cpu", num_
     print_stat("Cumulative product (sequential)", all_constraint_times)
     print_stat("Final error calculation", all_final_times)
     
-    # Calculate per-step averages (vectorized approach)
-    if len(all_spart_times) > 0 and physics.num_steps > 0:
-        avg_spart_per_step = (np.mean(all_spart_times) / physics.num_steps) * 1000
-        avg_rotation_per_step = (np.mean(all_rotation_times) / physics.num_steps) * 1000
-        avg_cumprod_per_step = (np.mean(all_constraint_times) / physics.num_steps) * 1000
-        
-        print(f"\nPer-step averages (vectorized approach):")
-        print(f"  SPART+Constraint per step:   {avg_spart_per_step:8.4f} ms")
-        print(f"  R_delta calculation per step: {avg_rotation_per_step:8.4f} ms")
-        print(f"  Cumulative product per step:  {avg_cumprod_per_step:8.4f} ms")
-        print(f"  Total per step (avg):         {(avg_spart_per_step + avg_rotation_per_step + avg_cumprod_per_step):8.4f} ms")
-    
-    print("="*70 + "\n")
 
 
 def verify_vectorized_equivalence(physics: PhysicsLayer, device: str = "cpu"):

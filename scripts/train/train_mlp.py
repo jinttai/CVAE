@@ -60,7 +60,7 @@ def main():
     TOTAL_TIME = 10.0
     NUM_EPOCHS = 2000
 
-    model = MLP(COND_DIM, OUTPUT_DIM).to(device)
+    model = MLP(COND_DIM, OUTPUT_DIM, joint_limits=robot['joint_limits']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 

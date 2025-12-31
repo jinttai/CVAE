@@ -120,7 +120,7 @@ def main():
     NUM_EPOCHS = 2000
 
     # 2. 모델 및 물리 엔진 준비
-    model = CVAE(COND_DIM, OUTPUT_DIM, LATENT_DIM).to(device)
+    model = CVAE(COND_DIM, OUTPUT_DIM, LATENT_DIM, joint_limits=robot['joint_limits']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
