@@ -6,6 +6,7 @@ import sys
 import time
 import numpy as np
 import math
+from torch.func import vmap  # For batch simulation
 
 # Add root directory to sys.path to find src
 ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../../"))
@@ -166,6 +167,7 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
     """
     PhysicsLayer에서 사용하는 Rmat 동역학과 동일하게 body orientation 궤적을 적분하여
     각 스텝의 Euler angle (yaw, pitch, roll)을 반환.
+    Vectorized version: wb 계산은 vmap으로 병렬 처리 (PhysicsLayer와 동일)
     """
     device = physics.device
     num_steps = physics.num_steps
@@ -175,32 +177,33 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
 
     R_curr = quat_to_rot(q0_init)
 
-    eulers = []
-    # Note: spart.kinematics, spart.diff_kinematics 등은 robot 객체 내부의 텐서와
-    # qm, qd 텐서의 device가 일치해야 한다. (device=physics.device)
-    for t in range(num_steps):
-        qm = q_traj[t]
-        qd = q_dot_traj[t]
-
-        # Rmat 동역학 함수 호출
+    # Vectorized: 모든 step의 wb를 한번에 계산 (PhysicsLayer.simulate_single과 동일)
+    def compute_wb_single_step(qm, qd):
+        """Single step의 wb 계산"""
         RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, physics.robot)
         Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, physics.robot)
         I0, Im = spart.inertia_projection(R0, RL, physics.robot)
         M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, physics.robot)
         H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, physics.robot)
 
-        # 궤적을 유지하기 위한 바디 프레임 모멘텀 계산
         rhs = -H0m @ qd
         H0_damped = H0 + 1e-6 * torch.eye(6, device=device)
         u0_sol = torch.linalg.solve(H0_damped, rhs)
-        
-        # 바디 각속도 (Body Angular Velocity)
-        wb = u0_sol[:3]
-
-        # Rmat 적분
-        R_delta = rot_from_omega(wb, physics.dt)
-        R_curr = R_curr @ R_delta
-
+        wb = u0_sol[:3]  # Angular Velocity part
+        return wb
+    
+    # vmap으로 모든 step을 병렬 처리
+    batch_compute_wb = vmap(compute_wb_single_step, in_dims=(0, 0))
+    wb_all = batch_compute_wb(q_traj, q_dot_traj)  # [num_steps, 3]
+    
+    # 모든 step의 R_delta를 한번에 계산
+    batch_rot_from_omega = vmap(rot_from_omega, in_dims=(0, None))
+    R_delta_all = batch_rot_from_omega(wb_all, physics.dt)  # [num_steps, 3, 3]
+    
+    # 순차적으로 R_curr 업데이트 및 euler 계산 (각 스텝마다 euler가 필요하므로)
+    eulers = []
+    for t in range(num_steps):
+        R_curr = R_curr @ R_delta_all[t]
         eulers.append(rot_to_euler(R_curr))
 
     euler_traj = torch.stack(eulers, dim=0)
@@ -325,8 +328,12 @@ def main():
     print("\n--- [Task 1] Fixed Goal Optimization with CVAE Init (LBFGS) ---")
 
     # 1. CVAE Inference (Warm Start) - CUDA에서 수행
-
-    cvae_weights_path = os.path.join(ROOT_DIR, "outputs/weights/cvae_debug/v3.pth")
+    inference_start = time.time()
+    
+    # CVAE inference parameters
+    num_samples = 10  # Number of samples to generate and evaluate
+    
+    cvae_weights_path = os.path.join(ROOT_DIR, "outputs/weights/cvae_debug/v4.pth")
     cvae_model = load_model(
         CVAE,
         cvae_weights_path,
@@ -336,6 +343,9 @@ def main():
         device, # CUDA 모델 로드
         joint_limits=robot['joint_limits']
     )
+
+    # Create batch simulator function using vmap
+    batch_sim_fn = vmap(physics_cuda.simulate_single, in_dims=(0, 0, 0, 0))
 
     with torch.no_grad():
         z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
@@ -382,9 +392,11 @@ def main():
     print(f"Initial waypoints (on CPU): {waypoints_param}")
 
     # (C) AdamW 최적화 (CPU 텐서 사용)
-    optimizer = optim.AdamW(
+    optimizer = optim.LBFGS(
         [waypoints_param],
-        lr=1e-2  # 기본 러닝레이트, 필요시 하이퍼파라미터 조정 가능
+        lr=1e-3, # 이미 수렴했다면 매우 작은 값에서 시작
+        max_iter=20,
+        line_search_fn='strong_wolfe' # Loss 상승 방지
     )
 
     loss_history = [best_loss]
@@ -414,7 +426,7 @@ def main():
 
     print(f"\nInference Finished (CVAE warm start). Time: {inference_end - inference_start:.4f}s")
     print(f"Optimization Finished (LBFGS, CPU). Time: {opt_end - opt_start:.4f}s")
-    print(f"Final Error: {final_loss:.10f} ({final_deg:.4f}°)")
+    print(f"Final Error: {final_loss:.10f} ({final_deg:.10f}°)")
     print(f"Iterations: {len(loss_history)}")
     print(f"Final waypoints (on CPU): {waypoints_param}")
 

@@ -189,7 +189,10 @@ class PhysicsLayer:
         """
         # vmap-safe 구현: 텐서 기반 분기 (no Python if on Tensor)
         wb_norm = torch.linalg.norm(wb)
-        theta = wb_norm * dt  # scalar tensor
+        # Clamp theta to prevent numerical instability from very large angular velocities
+        # Maximum rotation per step: π radians (180 degrees)
+        max_theta = 3.141592653589793  # π
+        theta = torch.clamp(wb_norm * dt, max=max_theta)  # scalar tensor
         eps = 1e-8
 
         # 공통적으로 사용할 항들 계산 (reuse wb_norm)
@@ -339,11 +342,15 @@ class PhysicsLayer:
         # Chordal distance (Frobenius norm) based loss
         R_err = R_goal.T @ R_curr
         trace_val = torch.trace(R_err)
+        # Clamp trace_val to prevent negative chordal_dist_sq due to numerical errors
+        trace_val = torch.clamp(trace_val, max=3.0)
         chordal_dist_sq = 3.0 - trace_val
         
         # Apply log for better numerical stability and gradient behavior
+        # Clamp to prevent negative values from numerical errors
         epsilon = 1e-8
-        loss = torch.log(chordal_dist_sq + epsilon)
+        chordal_dist_sq = torch.clamp(chordal_dist_sq, min=epsilon)
+        loss = torch.log(chordal_dist_sq)
         
         # Return final quaternion as well
         q_final = self._rot_to_quat(R_curr)
@@ -444,11 +451,15 @@ class PhysicsLayer:
         trace_val = torch.trace(R_err)
         
         # Chordal distance squared: 3 - trace(R_goal^T @ R_curr)
+        # Clamp trace_val to prevent negative chordal_dist_sq due to numerical errors
+        trace_val = torch.clamp(trace_val, max=3.0)
         chordal_dist_sq = 3.0 - trace_val
         
         # Apply log for better numerical stability and gradient behavior
+        # Clamp to prevent negative values from numerical errors
         epsilon = 1e-8
-        loss = torch.log(chordal_dist_sq + epsilon)
+        chordal_dist_sq = torch.clamp(chordal_dist_sq, min=epsilon)
+        loss = torch.log(chordal_dist_sq)
         return loss, q_curr
 
     def calculate_loss(self, waypoints_flat, q0_init, q0_goal):

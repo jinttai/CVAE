@@ -59,6 +59,9 @@ def main():
     BATCH_SIZE = 1024
     TOTAL_TIME = 10.0
     NUM_EPOCHS = 2000
+    
+    # Maximum joint angle penalty weight
+    MAX_JOINT_WEIGHT = 0.01  # Weight for maximum joint angle regularization
 
     model = MLP(COND_DIM, OUTPUT_DIM, joint_limits=robot['joint_limits']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -108,9 +111,27 @@ def main():
 
         waypoints_pred = model(condition)
 
-        loss = physics.calculate_loss(waypoints_pred, q0_start, q0_goal)
+        # Physics Simulation & Loss
+        physics_loss = physics.calculate_loss(waypoints_pred, q0_start, q0_goal)
+        
+        # Maximum joint angle penalty (encourage smaller joint angles)
+        waypoints_reshaped = waypoints_pred.view(BATCH_SIZE, NUM_WAYPOINTS, robot["n_q"])
+        # For each sample: max over all waypoints and joints
+        max_joint_angle_per_sample = waypoints_reshaped.abs().view(BATCH_SIZE, -1).max(dim=1)[0]  # [BATCH_SIZE]
+        max_joint_penalty = max_joint_angle_per_sample.mean()  # Average over batch
+        
+        # Combined loss
+        loss = physics_loss + MAX_JOINT_WEIGHT * max_joint_penalty
+
+        # Check for NaN and skip update if found
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"   >>> Warning: NaN/Inf loss detected at epoch {epoch+1}, skipping update")
+            optimizer.zero_grad()
+            continue
 
         loss.backward()
+        # Gradient clipping to prevent explosion
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         loss_value = loss.item()

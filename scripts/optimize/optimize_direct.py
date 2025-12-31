@@ -6,6 +6,7 @@ import sys
 import time
 import numpy as np
 import math
+from torch.func import vmap
 
 # Add root directory to sys.path to find src
 ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../../"))
@@ -128,6 +129,7 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
     """
     PhysicsLayer에서 사용하는 동역학과 동일하게 body orientation 궤적을 적분하여
     각 스텝의 Euler angle (yaw, pitch, roll)을 반환.
+    Vectorized version: wb 계산은 vmap으로 병렬 처리 (PhysicsLayer와 동일)
 
     Args:
         physics: PhysicsLayer 인스턴스
@@ -145,11 +147,9 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
 
     R_curr = quat_to_rot(q0_init)
 
-    eulers = []
-    for t in range(num_steps):
-        qm = q_traj[t]
-        qd = q_dot_traj[t]
-
+    # Vectorized: 모든 step의 wb를 한번에 계산 (PhysicsLayer.simulate_single과 동일)
+    def compute_wb_single_step(qm, qd):
+        """Single step의 wb 계산"""
         RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, physics.robot)
         Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, physics.robot)
         I0, Im = spart.inertia_projection(R0, RL, physics.robot)
@@ -159,11 +159,21 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
         rhs = -H0m @ qd
         H0_damped = H0 + 1e-6 * torch.eye(6, device=device)
         u0_sol = torch.linalg.solve(H0_damped, rhs)
-        wb = u0_sol[:3]
-
-        R_delta = rot_from_omega(wb, physics.dt)
-        R_curr = R_curr @ R_delta
-
+        wb = u0_sol[:3]  # Angular Velocity part
+        return wb
+    
+    # vmap으로 모든 step을 병렬 처리
+    batch_compute_wb = vmap(compute_wb_single_step, in_dims=(0, 0))
+    wb_all = batch_compute_wb(q_traj, q_dot_traj)  # [num_steps, 3]
+    
+    # 모든 step의 R_delta를 한번에 계산
+    batch_rot_from_omega = vmap(rot_from_omega, in_dims=(0, None))
+    R_delta_all = batch_rot_from_omega(wb_all, physics.dt)  # [num_steps, 3, 3]
+    
+    # 순차적으로 R_curr 업데이트 및 euler 계산 (각 스텝마다 euler가 필요하므로)
+    eulers = []
+    for t in range(num_steps):
+        R_curr = R_curr @ R_delta_all[t]
         eulers.append(rot_to_euler(R_curr))
 
     euler_traj = torch.stack(eulers, dim=0)
