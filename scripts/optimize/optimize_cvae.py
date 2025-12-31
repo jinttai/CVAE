@@ -64,25 +64,46 @@ def generate_random_quaternion_from_euler(batch_size, max_angle_deg=30.0, device
 def quat_to_rot(q):
     """
     쿼터니언 q = [x, y, z, w] 를 회전행렬 R (3x3) 로 변환.
+    - 단일 입력: [4] 또는 배치 입력: [B, 4] 모두 지원
+    - 행(row) 기준으로 쌓아 올바른 회전행렬을 반환 (전치 방지)
     """
-    # 쿼터니언이 배치(Batch) 차원을 가질 경우를 대비하여 dim=-1 기준으로 분리
-    if q.dim() > 1:
-        x, y, z, w = q.unbind(dim=-1)
-    else:
+    if q.dim() == 1:
         x, y, z, w = q
+    else:
+        x, y, z, w = q.unbind(dim=-1)
     
     xx, yy, zz = x * x, y * y, z * z
     xy, xz, yz = x * y, x * z, y * z
-    wx, wy, wz = w * x, w * z, w * y
-
-    # Note: wx, wy, wz 재계산 (w * x, w * y, w * z)
     wx, wy, wz = w * x, w * y, w * z
+    
+    r00 = 1.0 - 2.0 * (yy + zz)
+    r01 = 2.0 * (xy - wz)
+    r02 = 2.0 * (xz + wy)
+    r10 = 2.0 * (xy + wz)
+    r11 = 1.0 - 2.0 * (xx + zz)
+    r12 = 2.0 * (yz - wx)
+    r20 = 2.0 * (xz - wy)
+    r21 = 2.0 * (yz + wx)
+    r22 = 1.0 - 2.0 * (xx + yy)
 
-    R = torch.stack([
-        torch.stack([1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)]),
-        torch.stack([2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)]),
-        torch.stack([2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)])
-    ], dim=-1).reshape(3, 3) # 3x3 행렬로 최종 reshape
+    if q.dim() == 1:
+        R = torch.stack(
+            [
+                torch.stack([r00, r01, r02]),
+                torch.stack([r10, r11, r12]),
+                torch.stack([r20, r21, r22]),
+            ],
+            dim=0,
+        )
+    else:
+        R = torch.stack(
+            [
+                torch.stack([r00, r01, r02], dim=-1),
+                torch.stack([r10, r11, r12], dim=-1),
+                torch.stack([r20, r21, r22], dim=-1),
+            ],
+            dim=-2,
+        )
 
     return R
 
@@ -132,6 +153,13 @@ def rot_to_euler(R):
         roll = torch.zeros_like(yaw)
 
     return torch.stack([yaw, pitch, roll])
+
+def wrap_to_pi(x: torch.Tensor) -> torch.Tensor:
+    """
+    각도를 [-pi, pi] 범위로 래핑 (Euler 출력 시 점프 현상 완화)
+    """
+    two_pi = 2.0 * math.pi
+    return torch.remainder(x + math.pi, two_pi) - math.pi
 
 
 def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
@@ -297,7 +325,6 @@ def main():
     print("\n--- [Task 1] Fixed Goal Optimization with CVAE Init (LBFGS) ---")
 
     # 1. CVAE Inference (Warm Start) - CUDA에서 수행
-    inference_start = time.time()  
 
     cvae_weights_path = os.path.join(ROOT_DIR, "outputs/weights/cvae_debug/v3.pth")
     cvae_model = load_model(
@@ -306,32 +333,46 @@ def main():
         COND_DIM,
         OUTPUT_DIM,
         LATENT_DIM,
-        device, # CUDA 모델 로드
+        device,
     )
 
+    # vmap 함수를 미리 생성 (inference 측정 밖에서)
+    batch_sim_fn = torch.func.vmap(physics_cuda.simulate_single, in_dims=(0, 0, 0, 0))
+
+    # Warm-up: vmap 첫 호출 컴파일 오버헤드 제거
     with torch.no_grad():
-        num_samples = 1000
+        dummy_candidates = torch.zeros(1, OUTPUT_DIM, device=device)
+        dummy_q, dummy_qd = physics_cuda.generate_trajectory(dummy_candidates)
+        _ = batch_sim_fn(dummy_q, dummy_qd, q0_start, q0_goal)
+    torch.cuda.synchronize()
+
+    # 순수 inference 시간 측정
+    num_samples = 100
+    torch.cuda.synchronize()
+    inference_start = time.time()
+
+    with torch.no_grad():
         z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
         cond_batch = condition.repeat(num_samples, 1)
-
-        candidates = cvae_model.decode(cond_batch, z) # candidates: CUDA 텐서
-
-        # CUDA PhysicsLayer를 사용하여 손실 계산
+        candidates = cvae_model.decode(cond_batch, z)
+        
         q_traj, q_dot_traj = physics_cuda.generate_trajectory(candidates)
         
-        # torch.func.vmap은 배치 연산을 효율적으로 처리 (CUDA에서 빠름)
-        batch_sim_fn = torch.func.vmap(physics_cuda.simulate_single, in_dims=(0, 0, 0, 0))
-        losses = batch_sim_fn(
+        sim_out = batch_sim_fn(
             q_traj,
             q_dot_traj,
             q0_start.repeat(num_samples, 1),
             q0_goal.repeat(num_samples, 1),
         )
-
+        
+        losses = sim_out[0] if isinstance(sim_out, (tuple, list)) else sim_out
+        losses = torch.where(torch.isfinite(losses), losses, torch.full_like(losses, float("inf")))
+        
         best_idx = torch.argmin(losses)
-        best_waypoints = candidates[best_idx].unsqueeze(0).clone() # CUDA 텐서
+        best_waypoints = candidates[best_idx:best_idx + 1].clone()
         best_loss = losses[best_idx].item()
 
+    torch.cuda.synchronize()  # GPU 작업 완료 대기 (정확한 측정)
     inference_end = time.time()
     print(f"[CVAE Init] Selected best of {num_samples} samples with loss {best_loss:.8f}")
 
@@ -354,14 +395,10 @@ def main():
     
     print(f"Initial waypoints (on CPU): {waypoints_param}")
 
-    # (C) LBFGS 최적화 (CPU 텐서 사용)
-    optimizer = optim.LBFGS(
+    # (C) AdamW 최적화 (CPU 텐서 사용)
+    optimizer = optim.AdamW(
         [waypoints_param],
-        max_iter=50,
-        history_size=100,
-        tolerance_grad=1e-6,
-        tolerance_change=1e-6,
-        line_search_fn="strong_wolfe"
+        lr=1e-2  # 기본 러닝레이트, 필요시 하이퍼파라미터 조정 가능
     )
 
     loss_history = [best_loss]
@@ -415,21 +452,31 @@ def main():
         final_euler = euler_traj[-1]              # [3] (yaw, pitch, roll)
         target_euler_vec = target_euler           # [3] (yaw, pitch, roll)
 
-        final_euler_deg = final_euler * 180.0 / math.pi
-        target_euler_deg = target_euler_vec * 180.0 / math.pi
+        # Euler는 비유일/래핑이 있으므로 출력은 [-pi, pi]로 래핑해서 비교
+        final_euler_wrapped = wrap_to_pi(final_euler)
+        target_euler_wrapped = wrap_to_pi(target_euler_vec)
 
-        yaw_f, pitch_f, roll_f = final_euler[0], final_euler[1], final_euler[2]
+        final_euler_deg = final_euler_wrapped * 180.0 / math.pi
+        target_euler_deg = target_euler_wrapped * 180.0 / math.pi
+
+        yaw_f, pitch_f, roll_f = final_euler_wrapped[0], final_euler_wrapped[1], final_euler_wrapped[2]
         q_final = euler_to_quaternion(
             roll_f.unsqueeze(0),
             pitch_f.unsqueeze(0),
             yaw_f.unsqueeze(0),
         )  # [1, 4]
+        # 실제 자세 차이(최단 회전각)도 같이 출력: 2*acos(|<q1,q2>|)
+        q1 = q_final[0]
+        q2 = q0_goal_cpu[0]
+        dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
+        quat_angle_err = 2.0 * torch.acos(dot) * 180.0 / math.pi
 
         print("\n=== Orientation Check ===")
         print("Final Euler (deg)   [yaw, pitch, roll]:", final_euler_deg)
         print("Target Euler (deg)  [yaw, pitch, roll]:", target_euler_deg)
         print("Final quaternion (from Euler) :", q_final)
         print("Target quaternion (q0_goal)   :", q0_goal_cpu)
+        print("Quat angle error (deg)        :", quat_angle_err)
 
         plot_trajectory(
             q_traj_single,

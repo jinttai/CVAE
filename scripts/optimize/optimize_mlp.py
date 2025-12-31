@@ -318,13 +318,9 @@ def main():
     print(f"Initial waypoints (on CPU): {waypoints_param}")
 
     # (C) LBFGS 최적화 (CPU 텐서 사용)
-    optimizer = optim.LBFGS(
+    optimizer = optim.AdamW(
         [waypoints_param],
-        max_iter=50,
-        history_size=100,
-        tolerance_grad=1e-6,
-        tolerance_change=1e-6,
-        line_search_fn="strong_wolfe"
+        lr=1e-2  # 기본 러닝레이트, 필요시 하이퍼파라미터 조정 가능
     )
 
     loss_history = [best_loss]
