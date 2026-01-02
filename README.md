@@ -42,12 +42,13 @@
 
 ### 궤적 생성
 
-- **방법**: 4분절 3차 Hermite 스플라인
+- **방법**: 4분절 half-cosine (ease-in-out)
 - **구조**: 시작점(0) + 중간 waypoint 3개 + 끝점(0) = 총 5개 점
-- **스플라인 함수**: 
-  - 위치: `q(t) = q_start + (q_end - q_start) * t² * (3 - 2*t)`
-  - 속도: `q'(t) = (q_end - q_start) * 6*t*(1-t)`
-- **특징**: 각 waypoint에서 미분이 0이 되어 부드러운 궤적 보장
+- **basis 함수**:
+  - 위치: `b(t) = 0.5 * (1 - cos(pi * t))`
+  - 속도: `b'(t) = 0.5 * pi * sin(pi * t)`
+  - 따라서: `q(t) = q_start + (q_end - q_start) * b(t)`
+- **특징**: 각 waypoint에서 속도(미분)가 0이 되어 부드러운 궤적 보장
 
 ---
 
@@ -264,7 +265,7 @@ tensorboard --logdir outputs/logs/mlp_v4
 | 적분 방법 | Rotation Matrix (R_{k+1} = R_k @ R_delta) |
 | 손실 함수 | Chordal distance (log scale) |
 | Damping | 1e-6 |
-| 궤적 생성 | 4분절 3차 Hermite 스플라인 |
+| 궤적 생성 | 4분절 half-cosine (ease-in-out) |
 
 ### 최적화 파라미터
 

@@ -43,40 +43,44 @@ class PhysicsLayer:
         self._H0_damped_buffer = torch.zeros(6, 6, device=self.device, dtype=torch.float32)
 
     # ------------------------------------------------------------------
-    # Trajectory Generation (3차 스플라인)
+    # Trajectory Generation (half-cosine)
     # ------------------------------------------------------------------
-    def _cubic_spline_segment(self, q_start, q_end, t_normalized):
+    def _half_cosine_segment(self, q_start, q_end, t_normalized):
         """
-        3차 스플라인 분절: q(t) = q_start + (q_end - q_start) * t^2 * (3 - 2*t)
-        각 점에서 미분이 0이 되도록 설계됨
+        half-cosine 분절 (ease-in-out):
+          b(t) = 0.5 * (1 - cos(pi * t)),  t in [0, 1]
+          q(t) = q_start + (q_end - q_start) * b(t)
+
+        특징:
+          - t=0,1 에서 속도(미분)가 0
+
         q_start, q_end: [B, n_q]
         t_normalized: [seg_steps]
         Returns: [B, seg_steps, n_q]
         """
-        # 3차 Hermite basis: t^2 * (3 - 2*t)
-        basis = t_normalized * t_normalized * (3.0 - 2.0 * t_normalized)  # [seg_steps]
-        # 브로드캐스팅: [B, 1, n_q] + [B, 1, n_q] * [1, seg_steps, 1] -> [B, seg_steps, n_q]
+        basis = 0.5 * (1.0 - torch.cos(torch.pi * t_normalized))  # [seg_steps]
         q = q_start.unsqueeze(1) + (q_end.unsqueeze(1) - q_start.unsqueeze(1)) * basis.unsqueeze(0).unsqueeze(-1)
         return q
 
-    def _cubic_spline_derivative(self, q_start, q_end, t_normalized):
+    def _half_cosine_derivative(self, q_start, q_end, t_normalized):
         """
-        3차 스플라인의 미분: q'(t) = (q_end - q_start) * 6*t*(1-t)
+        half-cosine 미분 (w.r.t normalized time):
+          b'(t) = 0.5 * pi * sin(pi * t)
+          q'(t) = (q_end - q_start) * b'(t)
+
         q_start, q_end: [B, n_q]
         t_normalized: [seg_steps]
         Returns: [B, seg_steps, n_q]
         """
-        # 미분: 6*t*(1-t)
-        d_basis = 6.0 * t_normalized * (1.0 - t_normalized)  # [seg_steps]
-        # 브로드캐스팅: [B, 1, n_q] * [1, seg_steps, 1] -> [B, seg_steps, n_q]
+        d_basis = 0.5 * torch.pi * torch.sin(torch.pi * t_normalized)  # [seg_steps]
         q_dot = (q_end.unsqueeze(1) - q_start.unsqueeze(1)) * d_basis.unsqueeze(0).unsqueeze(-1)
         return q_dot
 
     def generate_trajectory(self, waypoints_flat):
         """
         [Batch, Waypoints*Joints] -> [Batch, Steps, Joints] (Pos, Vel)
-        4분절 3차 스플라인: 시작점(0) + 중간 waypoint 3개 + 끝점(0)
-        각 점에서 미분이 0
+        4분절 half-cosine: 시작점(0) + 중간 waypoint 3개 + 끝점(0)
+        각 점에서 속도(미분)가 0
         """
         batch_size = waypoints_flat.size(0)
         w_mid = waypoints_flat.view(batch_size, self.num_waypoints, self.n_q)
@@ -102,13 +106,13 @@ class PhysicsLayer:
             seg_steps = steps_per_segment + (1 if seg < remainder else 0)
 
             # 분절 내 정규화된 시간 [0, 1]
-            t_seg = torch.linspace(0, 1, seg_steps, device=self.device)
+            t_seg = torch.linspace(0, 1, seg_steps, device=self.device, dtype=waypoints_flat.dtype)
 
-            # 3차 스플라인으로 위치 계산: [B, seg_steps, n_q]
-            q_seg = self._cubic_spline_segment(q_start, q_end, t_seg)
+            # half-cosine으로 위치 계산: [B, seg_steps, n_q]
+            q_seg = self._half_cosine_segment(q_start, q_end, t_seg)
 
-            # 3차 스플라인의 미분으로 속도 계산: [B, seg_steps, n_q]
-            q_dot_seg = self._cubic_spline_derivative(q_start, q_end, t_seg)
+            # half-cosine 미분으로 속도 계산 (normalized time 기준): [B, seg_steps, n_q]
+            q_dot_seg = self._half_cosine_derivative(q_start, q_end, t_seg)
 
             # 시간 스케일링 (전체 시간에 맞춤)
             segment_time = (self.total_time / num_segments)
