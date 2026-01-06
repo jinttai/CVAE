@@ -363,6 +363,8 @@ class PhysicsLayer:
         """
         dt_eval = 0.01
         num_steps_eval = int(self.total_time / dt_eval)
+        # 실제 시뮬레이션 시간을 정확히 total_time에 맞추기 위해 dt 조정
+        actual_dt = self.total_time / num_steps_eval if num_steps_eval > 0 else dt_eval
         
         # 초기화
         R0 = self.R0
@@ -375,9 +377,16 @@ class PhysicsLayer:
 
         # --- Helper: 특정 시간 t에서의 입력(qm, qd) 보간 함수 ---
         def get_interpolated_input(t):
-            # t는 현재 시뮬레이션 시간
+            # t는 현재 시뮬레이션 시간 [0, total_time]
+            # 경계 조건 처리: t가 total_time에 가까우면 마지막 인덱스 사용
+            t_clamped = max(0.0, min(float(t), self.total_time - 1e-10))
+            
             # 원본 궤적의 인덱스(float) 계산
-            idx_float = t * (self.num_steps - 1) / self.total_time
+            if self.num_steps > 1:
+                idx_float = t_clamped * (self.num_steps - 1) / self.total_time
+            else:
+                idx_float = 0.0
+            
             idx_floor = int(idx_float)
             idx_ceil = min(idx_floor + 1, self.num_steps - 1)
             alpha = idx_float - idx_floor  # 보간 가중치 (0~1)
@@ -390,16 +399,14 @@ class PhysicsLayer:
         # --- Helper: 현재 쿼터니언(q)과 시간(t)에서 각속도(wb) 계산 ---
         # 핵심: RK4 단계마다 관성 행렬(H)이 바뀌므로 w도 다시 구해야 함
         def compute_omega(current_q, current_t):
-            # 1. 쿼터니언 -> 회전행렬 변환
-            # [수정] Rmat 버전(simulate_single)과 물리 동작을 일치시키기 위해
+            # [참고] Rmat 버전(simulate_single)과 물리 동작을 일치시키기 위해
             # Dynamics 계산 시에는 현재 자세(R_curr)가 아닌 초기 자세(R0, Identity)를 사용합니다.
             # 이는 중력/관성이 Base Orientation에 의존하지 않도록(혹은 Body Frame 기준 고정) 함을 의미합니다.
-            # R_curr_sub = self._quat_to_rot(current_q) 
             
-            # 2. 입력 보간값 가져오기
+            # 입력 보간값 가져오기
             qm_sub, qd_sub = get_interpolated_input(current_t)
 
-            # 3. SPART Dynamics 재계산
+            # SPART Dynamics 재계산
             # Rmat 버전과 동일하게 R0(Identity) 기준 동역학 풀이
             RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm_sub, self.robot)
             Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, self.robot)
@@ -407,7 +414,7 @@ class PhysicsLayer:
             M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, self.robot)
             H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot)
 
-            # 4. Constraint Solver
+            # Constraint Solver
             rhs = -H0m @ qd_sub
             H0_damped = H0 + 1e-6 * self.eye6
             u0_sol = torch.linalg.solve(H0_damped, rhs)
@@ -417,7 +424,14 @@ class PhysicsLayer:
         # --- Main Loop ---
         current_time = 0.0
         
-        for _ in range(num_steps_eval):
+        for step in range(num_steps_eval):
+            # 마지막 스텝에서는 남은 시간만큼만 적분
+            dt_step = actual_dt
+            if step == num_steps_eval - 1:
+                remaining_time = self.total_time - current_time
+                if remaining_time > 1e-10:
+                    dt_step = remaining_time
+            
             # RK4 Integration
             
             # k1: 현재 상태에서의 기울기
@@ -425,23 +439,27 @@ class PhysicsLayer:
             k1 = spart.quat_dot(q_curr, w1)
 
             # k2: 중간 상태 1에서의 기울기
-            q_k2 = normalize_quat(q_curr + 0.5 * dt_eval * k1)
-            w2 = compute_omega(q_k2, current_time + 0.5 * dt_eval)
+            q_k2 = normalize_quat(q_curr + 0.5 * dt_step * k1)
+            w2 = compute_omega(q_k2, current_time + 0.5 * dt_step)
             k2 = spart.quat_dot(q_k2, w2)
 
             # k3: 중간 상태 2에서의 기울기
-            q_k3 = normalize_quat(q_curr + 0.5 * dt_eval * k2)
-            w3 = compute_omega(q_k3, current_time + 0.5 * dt_eval)
+            q_k3 = normalize_quat(q_curr + 0.5 * dt_step * k2)
+            w3 = compute_omega(q_k3, current_time + 0.5 * dt_step)
             k3 = spart.quat_dot(q_k3, w3)
 
             # k4: 끝 상태에서의 기울기
-            q_k4 = normalize_quat(q_curr + dt_eval * k3)
-            w4 = compute_omega(q_k4, current_time + dt_eval)
+            q_k4 = normalize_quat(q_curr + dt_step * k3)
+            w4 = compute_omega(q_k4, current_time + dt_step)
             k4 = spart.quat_dot(q_k4, w4)
 
             # 최종 업데이트
-            q_curr = normalize_quat(q_curr + (dt_eval / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4))
-            current_time += dt_eval
+            q_curr = normalize_quat(q_curr + (dt_step / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4))
+            current_time += dt_step
+            
+            # 시간이 total_time에 도달했으면 종료
+            if current_time >= self.total_time - 1e-10:
+                break
 
         # Final Error Calculation - Angle error loss: log(epsilon + 1/2 * trace((Q - Q_d)^T * (Q - Q_d)))
         R_curr = self._quat_to_rot(q_curr)
