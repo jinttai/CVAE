@@ -267,6 +267,7 @@ def main():
     NUM_WAYPOINTS = 3
     OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
     TOTAL_TIME = 10.0  # 10초 trajectory
+    MAX_JOINT_WEIGHT = 0.01  # Weight for maximum joint angle regularization (same as training)
 
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
@@ -339,14 +340,23 @@ def main():
 
     def closure():
         optimizer.zero_grad()
-        loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu)
+        physics_loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu)
+        
+        # Maximum joint angle penalty (same as training)
+        waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot_cpu["n_q"])
+        max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0]  # [1]
+        max_joint_penalty = max_joint_angle.mean()  # Scalar
+        
+        # Combined loss (same as training)
+        loss = physics_loss + MAX_JOINT_WEIGHT * max_joint_penalty
+        
         loss.backward()
         loss_value = loss.item()
         loss_history.append(loss_value)
         iteration_count[0] += 1
 
         if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
-            print(f"[Iter] Iter [{iteration_count[0]}] Loss: {loss_value:.6f}")
+            print(f"[Iter] Iter [{iteration_count[0]}] Loss: {loss_value:.6f} (physics: {physics_loss.item():.6f}, joint_penalty: {max_joint_penalty.item():.6f})")
 
         return loss
 
@@ -354,13 +364,31 @@ def main():
     optimizer.step(closure)
     opt_end = time.time()
 
-    # 결과 확인 (Euler 기반 loss)
-    final_loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu).item()
-    final_deg = np.rad2deg(np.sqrt(final_loss)) if final_loss > 0 else 0.0
+    # 결과 확인
+    # Use physics loss only for angle error calculation (exclude joint penalty)
+    physics_loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu).item()
+    
+    # Calculate joint penalty separately for reporting
+    waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot_cpu["n_q"])
+    max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0].item()
+    max_joint_penalty = max_joint_angle * MAX_JOINT_WEIGHT
+    total_loss = physics_loss + max_joint_penalty
+    
+    # Calculate actual quaternion error for display
+    with torch.no_grad():
+        q_traj_temp, q_dot_traj_temp = physics_cpu.generate_trajectory(waypoints_param)
+        sim_out_temp = physics_cpu.simulate_single(q_traj_temp[0], q_dot_traj_temp[0], q0_start_cpu[0], q0_goal_cpu[0])
+        q_final_temp = sim_out_temp[1]
+        q1 = q_final_temp
+        q2 = q0_goal_cpu[0]
+        dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
+        angle_rad = 2.0 * torch.acos(dot)
+        final_deg = angle_rad * 180.0 / math.pi
 
     print(f"Inference Finished (MLP warm start). Time: {inference_end - inference_start:.4f}s")
     print(f"Optimization Finished (LBFGS). Time: {opt_end - opt_start:.4f}s")
-    print(f"Final Error: {final_loss:.10f} ({final_deg:.4f}°)")
+    print(f"Total Loss: {total_loss:.2e} (physics: {physics_loss:.2e}, joint_penalty: {max_joint_penalty:.2e})")
+    print(f"Angle Error: {final_deg.item():.2e}°")
     print(f"Iterations: {len(loss_history)}")
     print(f"Final waypoints: {waypoints_param}")
 
@@ -406,7 +434,7 @@ def main():
             q_traj_single,
             q_dot_traj_single,
             euler_traj,
-            f"MLP+LBFGS (Err: {final_loss:.6f})",
+            f"MLP+LBFGS (Err: {physics_loss:.6f}, Angle: {final_deg.item():.2e}°)",
             os.path.join(save_dir, "mlp_lbfgs_traj.png"),
             TOTAL_TIME,
             target_euler=target_euler,

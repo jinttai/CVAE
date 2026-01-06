@@ -264,11 +264,19 @@ def main():
     end_time = time.time()
     
     # Final Result
-    final_loss = gbest_loss
-    final_deg = np.rad2deg(np.sqrt(final_loss)) if final_loss > 0 else 0.0
+    physics_loss = gbest_loss  # PSO uses physics loss only (no joint penalty)
+    # loss is log(chordal_dist_sq), so we need to reverse the log and sqrt
+    # chordal_dist = 2 * sin(angle/2), so angle = 2 * arcsin(chordal_dist/2)
+    # For small angles: chordal_dist ≈ angle (rad)
+    chordal_dist_sq = np.exp(physics_loss)
+    chordal_dist = np.sqrt(chordal_dist_sq)
+    # Convert chordal distance to angle (rad), then to degrees
+    # For small angles, chordal_dist ≈ angle_rad
+    angle_rad = 2.0 * np.arcsin(np.clip(chordal_dist / 2.0, -1.0, 1.0))
+    final_deg = np.rad2deg(angle_rad)
     
     print(f"Optimization Finished (PSO). Time: {end_time - start_time:.4f}s")
-    print(f"Final Error: {final_loss:.10f} ({final_deg:.4f}°)")
+    print(f"Final Error: {physics_loss:.2e} ({final_deg:.2e}°)")
     print(f"Best waypoints: {gbest_pos}")
 
     # Visualize Best Result
@@ -287,7 +295,7 @@ def main():
             q_traj_single,
             q_dot_traj_single,
             euler_traj,
-            f"PSO (Err: {final_loss:.6f})",
+            f"PSO (Err: {physics_loss:.6f}, Angle: {final_deg:.2e}°)",
             os.path.join(save_dir, "pso_traj.png"),
             TOTAL_TIME,
             target_euler=target_euler,

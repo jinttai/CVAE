@@ -296,7 +296,7 @@ class PhysicsLayer:
         - 각 스텝에서 SPART 동역학을 통해 각속도 wb 를 구함
         - 회전행렬 R 를 R_{k+1} = R_k @ R_delta(wb, dt) 로 업데이트
         - 최종 R 와 목표 쿼터니언 q0_goal 을 회전행렬로 변환한 R_goal 간의
-          각도 오차를 반환 (chordal distance with log)
+          각도 오차를 반환: log(epsilon + 1/2 * trace((Q - Q_d)^T * (Q - Q_d)))
         """
         # 기준 좌표계 (사전 생성된 텐서 사용)
         R0 = self.R0
@@ -343,18 +343,13 @@ class PhysicsLayer:
             R_curr = R_curr @ R_delta_all[t]
         
         # --- 4. Final Orientation Error ---
-        # Chordal distance (Frobenius norm) based loss
-        R_err = R_goal.T @ R_curr
-        trace_val = torch.trace(R_err)
-        # Clamp trace_val to prevent negative chordal_dist_sq due to numerical errors
-        trace_val = torch.clamp(trace_val, max=3.0)
-        chordal_dist_sq = 3.0 - trace_val
-        
-        # Apply log for better numerical stability and gradient behavior
-        # Clamp to prevent negative values from numerical errors
+        # Angle error loss: log(epsilon + 1/2 * trace((Q - Q_d)^T * (Q - Q_d)))
+        R_diff = R_curr - R_goal  # [3, 3]
+        R_diff_T = R_diff.T  # [3, 3]
+        R_diff_sq = R_diff_T @ R_diff  # [3, 3]
+        trace_val = 0.5 * torch.trace(R_diff_sq)
         epsilon = 1e-8
-        chordal_dist_sq = torch.clamp(chordal_dist_sq, min=epsilon)
-        loss = torch.log(chordal_dist_sq)
+        loss = torch.log(epsilon + trace_val)
         
         # Return final quaternion as well
         q_final = self._rot_to_quat(R_curr)
@@ -448,22 +443,15 @@ class PhysicsLayer:
             q_curr = normalize_quat(q_curr + (dt_eval / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4))
             current_time += dt_eval
 
-        # Final Error Calculation - Chordal distance (Frobenius norm) based loss
+        # Final Error Calculation - Angle error loss: log(epsilon + 1/2 * trace((Q - Q_d)^T * (Q - Q_d)))
         R_curr = self._quat_to_rot(q_curr)
         R_goal = self._quat_to_rot(q_goal)
-        R_err = R_goal.T @ R_curr
-        trace_val = torch.trace(R_err)
-        
-        # Chordal distance squared: 3 - trace(R_goal^T @ R_curr)
-        # Clamp trace_val to prevent negative chordal_dist_sq due to numerical errors
-        trace_val = torch.clamp(trace_val, max=3.0)
-        chordal_dist_sq = 3.0 - trace_val
-        
-        # Apply log for better numerical stability and gradient behavior
-        # Clamp to prevent negative values from numerical errors
+        R_diff = R_curr - R_goal  # [3, 3]
+        R_diff_T = R_diff.T  # [3, 3]
+        R_diff_sq = R_diff_T @ R_diff  # [3, 3]
+        trace_val = 0.5 * torch.trace(R_diff_sq)
         epsilon = 1e-8
-        chordal_dist_sq = torch.clamp(chordal_dist_sq, min=epsilon)
-        loss = torch.log(chordal_dist_sq)
+        loss = torch.log(epsilon + trace_val)
         return loss, q_curr
 
     def calculate_loss(self, waypoints_flat, q0_init, q0_goal):

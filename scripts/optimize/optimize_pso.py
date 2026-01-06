@@ -196,14 +196,14 @@ def main() -> None:
     parser.add_argument("--pitch-deg", type=float, default=15.0)
     parser.add_argument("--yaw-deg", type=float, default=-15.0)
 
-    # PSO hyperparams
-    parser.add_argument("--particles", type=int, default=1024)
-    parser.add_argument("--iters", type=int, default=200)
-    parser.add_argument("--w", type=float, default=0.6, help="inertia")
-    parser.add_argument("--c1", type=float, default=1.5, help="cognitive")
-    parser.add_argument("--c2", type=float, default=1.5, help="social")
-    parser.add_argument("--tol", type=float, default=1e-6, help="early stop threshold for best loss")
-    parser.add_argument("--vmax-frac", type=float, default=0.2, help="velocity clamp as fraction of (upper-lower)")
+    # PSO hyperparams (adjusted for exact solution)
+    parser.add_argument("--particles", type=int, default=2048, help="number of particles (increased for better exploration)")
+    parser.add_argument("--iters", type=int, default=1000, help="maximum iterations (increased for convergence)")
+    parser.add_argument("--w", type=float, default=0.5, help="inertia weight (lowered for better convergence)")
+    parser.add_argument("--c1", type=float, default=1.7, help="cognitive coefficient (increased for better local search)")
+    parser.add_argument("--c2", type=float, default=1.7, help="social coefficient (increased for better global search)")
+    parser.add_argument("--tol", type=float, default=1e-8, help="early stop threshold for best loss (tighter for exact solution)")
+    parser.add_argument("--vmax-frac", type=float, default=0.15, help="velocity clamp as fraction of (upper-lower) (reduced for stability)")
     parser.add_argument("--eval-batch-size", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=0)
 
@@ -359,14 +359,26 @@ def main() -> None:
                 f"iter={hist_iter_s[-1]*1000.0:.1f}ms  eval={hist_eval_s[-1]*1000.0:.1f}ms"
             )
 
-        # early stop
-        if state.gbest_f <= float(args.tol):
-            print(f"[early-stop] reached tol={float(args.tol):.1e} at iter={it}, best={state.gbest_f:.6e}")
+        # early stop: convert log loss to actual trace value for comparison
+        # loss = log(epsilon + trace_val), so trace_val = exp(loss) - epsilon
+        epsilon = 1e-8
+        actual_trace_val = np.exp(state.gbest_f) - epsilon
+        if actual_trace_val <= float(args.tol):
+            print(f"[early-stop] reached tol={float(args.tol):.1e} at iter={it}, best_loss={state.gbest_f:.6e}, trace_val={actual_trace_val:.2e}")
             break
 
     opt_end = time.time()
-    best_deg = float(np.rad2deg(np.sqrt(state.gbest_f))) if state.gbest_f > 0 else 0.0
-    print(f"\n[done] best_loss={state.gbest_f:.10f}  (~{best_deg:.4f} deg)")
+    # Calculate actual quaternion error for display
+    with torch.no_grad():
+        q_traj_temp, q_dot_traj_temp = physics.generate_trajectory(state.gbest_x.unsqueeze(0))
+        sim_out_temp = physics.simulate_single(q_traj_temp[0], q_dot_traj_temp[0], q0_start[0], q0_goal[0])
+        q_final_temp = sim_out_temp[1]
+        q1 = q_final_temp
+        q2 = q0_goal[0]
+        dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
+        angle_rad = 2.0 * torch.acos(dot)
+        best_deg = float(angle_rad * 180.0 / math.pi)
+    print(f"\n[done] best_loss={state.gbest_f:.2e}  (~{best_deg:.2e} deg)")
     total_s = opt_end - opt_start
     mean_iter_ms = (1000.0 * float(np.mean(hist_iter_s))) if hist_iter_s else 0.0
     mean_eval_ms = (1000.0 * float(np.mean(hist_eval_s))) if hist_eval_s else 0.0

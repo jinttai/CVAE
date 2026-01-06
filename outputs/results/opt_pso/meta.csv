@@ -1,0 +1,2 @@
+dt,total_time,num_waypoints,n_q,D,particles,iters_done,iters_max,tol,w,c1,c2,vmax_frac,eval_batch_size,seed
+0.1,10.0,3,6,18,2048,55,1000,1e-08,0.5,1.7,1.7,0.15,1024,0

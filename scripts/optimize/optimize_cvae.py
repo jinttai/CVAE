@@ -6,6 +6,7 @@ import sys
 import time
 import numpy as np
 import math
+import argparse
 from torch.func import vmap  # For batch simulation
 
 # Add root directory to sys.path to find src
@@ -287,12 +288,24 @@ def load_model(model_class, weights_path, input_dim, output_dim, latent_dim=None
     return model
 
 
+
 # === Main Execution ===
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="CVAE-based trajectory optimization with optional LBFGS refinement")
+    parser.add_argument("--no-optimize", action="store_true", 
+                        help="Skip LBFGS optimization after CVAE sampling (only use best sample)")
+    parser.add_argument("--num-samples", type=int, default=1024,
+                        help="Number of CVAE samples to generate and evaluate ")
+    args = parser.parse_args()
+    
     # 1. 초기 설정 (CVAE Inference는 CUDA 사용)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"=== NN-based Initialization + LBFGS Start on {device} ===")
+    device = "cuda"
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available. This script requires GPU.")
+    optimize_flag = not args.no_optimize
+    print(f"=== NN-based Initialization {'+ LBFGS' if optimize_flag else '(Sampling Only)'} Start on {device} ===")
 
     # 로봇 로드 (CUDA용)
     urdf_path = os.path.join(ROOT_DIR, "assets/SC_ur10e.urdf")
@@ -304,9 +317,10 @@ def main():
     OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
     LATENT_DIM = 8
     TOTAL_TIME = 10.0  # 10초 trajectory
+    MAX_JOINT_WEIGHT = 0.01  # Weight for maximum joint angle regularization (same as training)
 
-    # CVAE Inference를 위한 PhysicsLayer (CUDA)
-    physics_cuda = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
+    # PhysicsLayer (GPU only)
+    physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
     save_dir = os.path.join(ROOT_DIR, "outputs/results/opt_nn_lbfgs")
     os.makedirs(save_dir, exist_ok=True)
@@ -331,7 +345,7 @@ def main():
     inference_start = time.time()
     
     # CVAE inference parameters
-    num_samples = 10  # Number of samples to generate and evaluate
+    num_samples = args.num_samples  # Number of samples to generate and evaluate
     
     cvae_weights_path = os.path.join(ROOT_DIR, "outputs/weights/cvae_debug/v4.pth")
     cvae_model = load_model(
@@ -345,14 +359,14 @@ def main():
     )
 
     # Create batch simulator function using vmap
-    batch_sim_fn = vmap(physics_cuda.simulate_single, in_dims=(0, 0, 0, 0))
+    batch_sim_fn = vmap(physics.simulate_single, in_dims=(0, 0, 0, 0))
 
     with torch.no_grad():
         z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
         cond_batch = condition.repeat(num_samples, 1)
         candidates = cvae_model.decode(cond_batch, z)
         
-        q_traj, q_dot_traj = physics_cuda.generate_trajectory(candidates)
+        q_traj, q_dot_traj = physics.generate_trajectory(candidates)
         
         sim_out = batch_sim_fn(
             q_traj,
@@ -373,79 +387,129 @@ def main():
     print(f"[CVAE Init] Selected best of {num_samples} samples with loss {best_loss:.8f}")
 
     # =================================================================
-    # 2. LBFGS Refinement를 위해 CPU로 전환 (장치 전환)
+    # 2. LBFGS Refinement (Optional)
     # =================================================================
-    refinement_device = "cpu"
-    print(f"\n--- Switching Refinement to {refinement_device} ---")
+    if not optimize_flag:
+        # Skip optimization, use best sample directly
+        print("\n--- Skipping LBFGS optimization (using best sample directly) ---")
+        waypoints_param = best_waypoints.clone()
+        
+        # Evaluate final loss without optimization (GPU)
+        with torch.no_grad():
+            q_traj, q_dot_traj = physics.generate_trajectory(waypoints_param)
+            sim_out = physics.simulate_single(q_traj[0], q_dot_traj[0], q0_start[0], q0_goal[0])
+            physics_loss = sim_out[0].item()
+            q_final_from_sim = sim_out[1]  # Final quaternion from simulate_single (used for loss calculation)
+            
+            waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
+            max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0].item()
+            max_joint_penalty = max_joint_angle * MAX_JOINT_WEIGHT
+            total_loss = physics_loss + max_joint_penalty
+            
+            # Calculate actual quaternion error from simulate_single's q_final
+            q1 = q_final_from_sim
+            q2 = q0_goal[0]
+            dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
+            quat_angle_err_from_sim = 2.0 * torch.acos(dot) * 180.0 / math.pi
+        
+        print(f"\nInference Finished (CVAE sampling only). Time: {inference_end - inference_start:.4f}s")
+        print(f"Physics Loss (GPU): {physics_loss:.8f}")
+        print(f"Total Loss: {total_loss:.2e} (physics: {physics_loss:.2e}, joint_penalty: {max_joint_penalty:.2e})")
+        print(f"Quat angle error (from simulate_single q_final): {quat_angle_err_from_sim.item():.2e}°")
+        print(f"Final waypoints (on GPU): {waypoints_param}")
+        
+        opt_start = inference_end
+        opt_end = inference_end
+    else:
+        # =================================================================
+        # 2. LBFGS Refinement (GPU)
+        # =================================================================
+        print(f"\n--- LBFGS Refinement on {device} ---")
+        
+        waypoints_param = best_waypoints.clone()
+        waypoints_param.requires_grad = True
+        
+        print(f"Initial waypoints (on GPU): {waypoints_param}")
 
-    # (A) Physics Layer 및 Robot 데이터를 CPU로 이동/재생성
-    robot_cpu, _ = urdf2robot(urdf_path, verbose_flag=False, device=refinement_device)
-    physics_cpu = PhysicsLayer(robot_cpu, NUM_WAYPOINTS, TOTAL_TIME, refinement_device)
-    
-    # (B) 최적화에 사용될 텐서들을 CUDA -> CPU로 이동
-    waypoints_param = best_waypoints.detach().cpu().clone()
-    q0_start_cpu = q0_start.cpu()
-    q0_goal_cpu = q0_goal.cpu()
+        # LBFGS optimization (GPU)
+        optimizer = optim.LBFGS(
+            [waypoints_param],
+            lr=1e-3,
+            max_iter=20,
+            line_search_fn='strong_wolfe'
+        )
 
-    waypoints_param.requires_grad = True # CPU 텐서에 대해 gradient 설정
-    
-    print(f"Initial waypoints (on CPU): {waypoints_param}")
+        loss_history = [best_loss]
+        iteration_count = [0]
 
-    # (C) AdamW 최적화 (CPU 텐서 사용)
-    optimizer = optim.LBFGS(
-        [waypoints_param],
-        lr=1e-3, # 이미 수렴했다면 매우 작은 값에서 시작
-        max_iter=20,
-        line_search_fn='strong_wolfe' # Loss 상승 방지
-    )
+        def closure():
+            optimizer.zero_grad()
+            physics_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
+            
+            # Maximum joint angle penalty (same as training)
+            waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
+            max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0]  # [1]
+            max_joint_penalty = max_joint_angle.mean()  # Scalar
+            
+            # Combined loss (same as training)
+            loss = physics_loss + MAX_JOINT_WEIGHT * max_joint_penalty
+            
+            loss.backward()
+            loss_value = loss.item()
+            loss_history.append(loss_value)
+            iteration_count[0] += 1
 
-    loss_history = [best_loss]
-    iteration_count = [0]
+            if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
+                print(f"[GPU] Iter [{iteration_count[0]}] Loss: {loss_value:.6f} (physics: {physics_loss.item():.6f}, joint_penalty: {max_joint_penalty.item():.6f})")
 
-    def closure():
-        optimizer.zero_grad()
-        # physics_cpu 객체와 CPU 텐서들을 사용
-        loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu)
-        loss.backward()
-        loss_value = loss.item()
-        loss_history.append(loss_value)
-        iteration_count[0] += 1
+            return loss
 
-        if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
-            print(f"[CPU] Iter [{iteration_count[0]}] Loss: {loss_value:.6f}")
+        opt_start = time.time()
+        optimizer.step(closure)
+        opt_end = time.time()
 
-        return loss
+        # Results (GPU)
+        with torch.no_grad():
+            physics_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal).item()
+            
+            waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
+            max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0].item()
+            max_joint_penalty = max_joint_angle * MAX_JOINT_WEIGHT
+            total_loss = physics_loss + max_joint_penalty
 
-    opt_start = time.time()
-    optimizer.step(closure)
-    opt_end = time.time()
+            # Calculate actual quaternion error for display
+            q_traj_temp, q_dot_traj_temp = physics.generate_trajectory(waypoints_param)
+            sim_out_temp = physics.simulate_single(q_traj_temp[0], q_dot_traj_temp[0], q0_start[0], q0_goal[0])
+            q_final_temp = sim_out_temp[1]
+            q1 = q_final_temp
+            q2 = q0_goal[0]
+            dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
+            angle_rad = 2.0 * torch.acos(dot)
+            final_deg = angle_rad * 180.0 / math.pi
 
-    # 결과 확인 및 시각화 (CPU 텐서 사용)
-    final_loss = physics_cpu.calculate_loss(waypoints_param, q0_start_cpu, q0_goal_cpu).item()
-    final_deg = np.rad2deg(np.sqrt(final_loss)) if final_loss > 0 else 0.0
+        print(f"\nInference Finished (CVAE warm start). Time: {inference_end - inference_start:.4f}s")
+        print(f"Optimization Finished (LBFGS, GPU). Time: {opt_end - opt_start:.4f}s")
+        print(f"Total Loss: {total_loss:.2e} (physics: {physics_loss:.2e}, joint_penalty: {max_joint_penalty:.2e})")
+        print(f"Angle Error: {final_deg.item():.2e}°")
+        print(f"Iterations: {len(loss_history)}")
+        print(f"Final waypoints (on GPU): {waypoints_param}")
 
-    print(f"\nInference Finished (CVAE warm start). Time: {inference_end - inference_start:.4f}s")
-    print(f"Optimization Finished (LBFGS, CPU). Time: {opt_end - opt_start:.4f}s")
-    print(f"Final Error: {final_loss:.10f} ({final_deg:.10f}°)")
-    print(f"Iterations: {len(loss_history)}")
-    print(f"Final waypoints (on CPU): {waypoints_param}")
-
-    # 3. 최종 궤적 생성 및 저장 (CPU)
+    # 3. 최종 궤적 생성 및 저장 (GPU)
     with torch.no_grad():
-        # CPU PhysicsLayer를 사용하여 궤적 생성 (결과 텐서는 CPU에 있음)
-        q_traj, q_dot_traj = physics_cpu.generate_trajectory(waypoints_param)
+        # Generate trajectory on GPU
+        q_traj, q_dot_traj = physics.generate_trajectory(waypoints_param)
         q_traj_single = q_traj[0]
         q_dot_traj_single = q_dot_traj[0]
         
-        # compute_orientation_traj 함수 (CPU 텐서 사용)
-        euler_traj = compute_orientation_traj(physics_cpu, q_traj_single, q_dot_traj_single, q0_start_cpu[0])
+        # compute_orientation_traj function
+        euler_traj = compute_orientation_traj(physics, q_traj_single, q_dot_traj_single, q0_start[0])
 
-        # Target body orientation (q0_goal_cpu[0] 사용)
-        R_goal = quat_to_rot(q0_goal_cpu[0])
+        # Target body orientation
+        R_goal = quat_to_rot(q0_goal[0])
         target_euler = rot_to_euler(R_goal)
 
         # --------------------------------------------------------------
-        # Debug: compare final vs desired orientation (quat + Euler)
+        # Compare final vs desired orientation (quat + Euler)
         # --------------------------------------------------------------
         final_euler = euler_traj[-1]              # [3] (yaw, pitch, roll)
         target_euler_vec = target_euler           # [3] (yaw, pitch, roll)
@@ -465,23 +529,36 @@ def main():
         )  # [1, 4]
         # 실제 자세 차이(최단 회전각)도 같이 출력: 2*acos(|<q1,q2>|)
         q1 = q_final[0]
-        q2 = q0_goal_cpu[0]
+        q2 = q0_goal[0]
         dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
         quat_angle_err = 2.0 * torch.acos(dot) * 180.0 / math.pi
+
+        # Also get q_final from simulate_single for comparison
+        sim_out_viz = physics.simulate_single(q_traj_single, q_dot_traj_single, q0_start[0], q0_goal[0])
+        q_final_from_sim_viz = sim_out_viz[1]
+        q1_sim = q_final_from_sim_viz
+        dot_sim = torch.sum(q1_sim * q2).abs().clamp(-1.0, 1.0)
+        quat_angle_err_sim = 2.0 * torch.acos(dot_sim) * 180.0 / math.pi
 
         print("\n=== Orientation Check ===")
         print("Final Euler (deg)   [yaw, pitch, roll]:", final_euler_deg)
         print("Target Euler (deg)  [yaw, pitch, roll]:", target_euler_deg)
         print("Final quaternion (from Euler) :", q_final)
-        print("Target quaternion (q0_goal)   :", q0_goal_cpu)
-        print("Quat angle error (deg)        :", quat_angle_err)
+        print("Final quaternion (from simulate_single):", q_final_from_sim_viz)
+        print("Target quaternion (q0_goal)   :", q0_goal)
+        print(f"Quat angle error (from Euler)        : {quat_angle_err.item():.2e}°")
+        print(f"Quat angle error (from simulate_single): {quat_angle_err_sim.item():.2e}°")
 
+        # Plot title depends on whether optimization was performed
+        # Use quat_angle_err_sim for angle display (available in both cases)
+        plot_title = f"CVAE{'+LBFGS' if optimize_flag else ''} (Err: {physics_loss:.6f}, Angle: {quat_angle_err_sim.item():.2e}°)"
+        plot_filename = "cvae_lbfgs_traj_gpu_opt.png" if optimize_flag else "cvae_sample_traj.png"
         plot_trajectory(
             q_traj_single,
             q_dot_traj_single,
             euler_traj,
-            f"CVAE+LBFGS (Err: {final_loss:.6f})",
-            os.path.join(save_dir, "cvae_lbfgs_traj_cpu_opt.png"),
+            plot_title,
+            os.path.join(save_dir, plot_filename),
             TOTAL_TIME,
             target_euler=target_euler,
         )
@@ -489,7 +566,7 @@ def main():
         # ------------------------------------------------------------------
         # Save data for external (e.g., MATLAB) plotting as CSV files
         # ------------------------------------------------------------------
-        dt = float(physics_cpu.dt)
+        dt = float(physics.dt)
         num_steps = q_traj_single.shape[0]
         t = np.linspace(0.0, TOTAL_TIME, num_steps)
 
@@ -497,12 +574,12 @@ def main():
         q_dot_np = q_dot_traj_single.detach().cpu().numpy()
         euler_np = euler_traj.detach().cpu().numpy()
         waypoints_np = waypoints_param.detach().cpu().numpy()
-        q0_start_np = q0_start_cpu.detach().cpu().numpy()
-        q0_goal_np = q0_goal_cpu.detach().cpu().numpy()
+        q0_start_np = q0_start.detach().cpu().numpy()
+        q0_goal_np = q0_goal.detach().cpu().numpy()
         target_euler_np = target_euler.detach().cpu().numpy()
 
         # CSV 파일 저장 로직 (이전 코드와 동일)
-        n_q = robot_cpu["n_q"]
+        n_q = robot["n_q"]
         
         # 1) Joint position trajectory
         header_q = "t," + ",".join([f"J{i+1}" for i in range(n_q)])
