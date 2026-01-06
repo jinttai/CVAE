@@ -182,7 +182,7 @@ def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
 
 def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time, target_euler=None):
     """
-    joint trajectory는 PhysicsLayer.generate_trajectory의 half-cosine 결과를 그대로 사용하고,
+    joint trajectory는 PhysicsLayer.generate_trajectory의 5차 다항식(quintic) 결과를 그대로 사용하고,
     body orientation 궤적은 Euler angle 로 함께 plot.
     """
     q_traj = q_traj.detach().cpu().numpy()

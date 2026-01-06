@@ -69,16 +69,28 @@ def quat_dcm(q):
     ], dtype=np.float32)
 
 def quat_dot(q, w):
+    """
+    Quaternion derivative: dq/dt = 0.5 * q * [0, wx, wy, wz]
+    where q = [q1, q2, q3, q0] = [x, y, z, w] and w = [wx, wy, wz]
+    
+    Standard formula:
+    q_dot = 0.5 * [q0*wx - q3*wy + q2*wz,
+                   q3*wx + q0*wy - q1*wz,
+                   -q2*wx + q1*wy + q0*wz,
+                   -q1*wx - q2*wy - q3*wz]
+    """
     q = np.asarray(q, dtype=np.float32).flatten()
     w = np.asarray(w, dtype=np.float32).flatten()
     assert len(q) == 4 and len(w) == 3, 'quaternion or angular velocity length error'
-    q1, q2, q3, q0 = q
-    w1, w2, w3 = w
+    q1, q2, q3, q0 = q  # [x, y, z, w]
+    w1, w2, w3 = w      # [wx, wy, wz]
+    
+    # Standard quaternion derivative formula (matching spart_casadi.py)
     return np.array([
-        -0.5 * (w1 * q2 + w2 * q3 + w3 * q0),
-        0.5 * (w1 * q0 - w2 * q3 + w3 * q2),
-        0.5 * (w2 * q0 + w1 * q3 - w3 * q1),
-        0.5 * (w3 * q0 - w1 * q2 + w2 * q1)
+        0.5 * (q0 * w1 + q2 * w3 - q3 * w2),  # q_dot[0] = x_dot
+        0.5 * (q0 * w2 + q3 * w1 - q1 * w3),  # q_dot[1] = y_dot
+        0.5 * (q0 * w3 + q1 * w2 - q2 * w1),  # q_dot[2] = z_dot
+        0.5 * (-q1 * w1 - q2 * w2 - q3 * w3)  # q_dot[3] = w_dot
     ], dtype=np.float32)
 
 def accelerations(t0, tL, P0, pm, Bi0, Bij, u0, um, u0dot, umdot, robot):

@@ -43,44 +43,55 @@ class PhysicsLayer:
         self._H0_damped_buffer = torch.zeros(6, 6, device=self.device, dtype=torch.float32)
 
     # ------------------------------------------------------------------
-    # Trajectory Generation (half-cosine)
+    # Trajectory Generation (quintic polynomial)
     # ------------------------------------------------------------------
-    def _half_cosine_segment(self, q_start, q_end, t_normalized):
+    def _quintic_segment(self, q_start, q_end, t_normalized):
         """
-        half-cosine 분절 (ease-in-out):
-          b(t) = 0.5 * (1 - cos(pi * t)),  t in [0, 1]
+        5차 다항식(quintic) 분절 (ease-in-out):
+          b(t) = 6 t^5 - 15 t^4 + 10 t^3,  t in [0, 1]
           q(t) = q_start + (q_end - q_start) * b(t)
 
         특징:
-          - t=0,1 에서 속도(미분)가 0
+          - t = 0, 1 에서 속도, 가속도 모두 0 (b'(0)=b'(1)=0, b''(0)=b''(1)=0)
 
         q_start, q_end: [B, n_q]
         t_normalized: [seg_steps]
         Returns: [B, seg_steps, n_q]
         """
-        basis = 0.5 * (1.0 - torch.cos(torch.pi * t_normalized))  # [seg_steps]
-        q = q_start.unsqueeze(1) + (q_end.unsqueeze(1) - q_start.unsqueeze(1)) * basis.unsqueeze(0).unsqueeze(-1)
+        t = t_normalized
+        t2 = t * t
+        t3 = t2 * t
+        t4 = t3 * t
+        t5 = t4 * t
+        basis = 6.0 * t5 - 15.0 * t4 + 10.0 * t3  # [seg_steps]
+        dq = (q_end.unsqueeze(1) - q_start.unsqueeze(1))  # [B, 1, n_q]
+        q = q_start.unsqueeze(1) + dq * basis.unsqueeze(0).unsqueeze(-1)
         return q
 
-    def _half_cosine_derivative(self, q_start, q_end, t_normalized):
+    def _quintic_derivative(self, q_start, q_end, t_normalized):
         """
-        half-cosine 미분 (w.r.t normalized time):
-          b'(t) = 0.5 * pi * sin(pi * t)
+        5차 다항식(quintic)의 1차 미분 (정규화 시간 기준):
+          b'(t) = 30 t^4 - 60 t^3 + 30 t^2
           q'(t) = (q_end - q_start) * b'(t)
 
         q_start, q_end: [B, n_q]
         t_normalized: [seg_steps]
         Returns: [B, seg_steps, n_q]
         """
-        d_basis = 0.5 * torch.pi * torch.sin(torch.pi * t_normalized)  # [seg_steps]
-        q_dot = (q_end.unsqueeze(1) - q_start.unsqueeze(1)) * d_basis.unsqueeze(0).unsqueeze(-1)
+        t = t_normalized
+        t2 = t * t
+        t3 = t2 * t
+        t4 = t3 * t
+        d_basis = 30.0 * t4 - 60.0 * t3 + 30.0 * t2  # [seg_steps]
+        dq = (q_end.unsqueeze(1) - q_start.unsqueeze(1))  # [B, 1, n_q]
+        q_dot = dq * d_basis.unsqueeze(0).unsqueeze(-1)
         return q_dot
 
     def generate_trajectory(self, waypoints_flat):
         """
         [Batch, Waypoints*Joints] -> [Batch, Steps, Joints] (Pos, Vel)
-        4분절 half-cosine: 시작점(0) + 중간 waypoint 3개 + 끝점(0)
-        각 점에서 속도(미분)가 0
+        4분절 5차 다항식(quintic): 시작점(0) + 중간 waypoint 3개 + 끝점(0)
+        각 분절의 양 끝에서 속도, 가속도가 0
         """
         batch_size = waypoints_flat.size(0)
         w_mid = waypoints_flat.view(batch_size, self.num_waypoints, self.n_q)
@@ -108,11 +119,11 @@ class PhysicsLayer:
             # 분절 내 정규화된 시간 [0, 1]
             t_seg = torch.linspace(0, 1, seg_steps, device=self.device, dtype=waypoints_flat.dtype)
 
-            # half-cosine으로 위치 계산: [B, seg_steps, n_q]
-            q_seg = self._half_cosine_segment(q_start, q_end, t_seg)
+            # quintic polynomial으로 위치 계산: [B, seg_steps, n_q]
+            q_seg = self._quintic_segment(q_start, q_end, t_seg)
 
-            # half-cosine 미분으로 속도 계산 (normalized time 기준): [B, seg_steps, n_q]
-            q_dot_seg = self._half_cosine_derivative(q_start, q_end, t_seg)
+            # quintic polynomial 1차 미분으로 속도 계산 (normalized time 기준): [B, seg_steps, n_q]
+            q_dot_seg = self._quintic_derivative(q_start, q_end, t_seg)
 
             # 시간 스케일링 (전체 시간에 맞춤)
             segment_time = (self.total_time / num_segments)
@@ -361,8 +372,9 @@ class PhysicsLayer:
         - RK4의 각 Sub-step마다 SPART 동역학을 새로 풀어 변화하는 w(각속도)를 반영
         - 입력 궤적(qm, qd)을 선형 보간(Linear Interpolation)하여 부드러운 입력 제공
         """
-        dt_eval = 0.01
-        num_steps_eval = int(self.total_time / dt_eval)
+        # Use 5000 steps for higher accuracy
+        num_steps_eval = 5000
+        dt_eval = self.total_time / num_steps_eval
         # 실제 시뮬레이션 시간을 정확히 total_time에 맞추기 위해 dt 조정
         actual_dt = self.total_time / num_steps_eval if num_steps_eval > 0 else dt_eval
         

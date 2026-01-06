@@ -1,18 +1,18 @@
 """
-RK4 Implementation Test Script
+RK4 Comparison Script
 
-이 스크립트는 simulate_single_rk4 함수의 구현을 검증합니다:
-1. 시간 경계 조건 검증
-2. 보간 로직 검증
-3. Loss 계산 검증
-4. 간단한 케이스에서의 동작 확인
-5. simulate_single과의 비교
+이 스크립트는 다음 세 가지 결과를 비교합니다:
+1. sim_result.csv: MATLAB 시뮬레이션 결과
+2. opt_nn_lbfgs 결과: 최적화된 waypoint로 생성된 궤적
+3. opt_nn_lbfgs waypoint + RK4: 최적화된 waypoint를 RK4로 시뮬레이션한 결과
 """
 
 import torch
 import numpy as np
 import os
 import sys
+import pandas as pd
+import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 
 # Add root directory to sys.path to find src
@@ -21,343 +21,469 @@ sys.path.append(ROOT_DIR)
 
 from src.training.physics_layer import PhysicsLayer
 from src.dynamics.urdf2robot_torch import urdf2robot
+from torch.func import vmap
+import src.dynamics.spart_functions_torch as spart
 
 
-def test_time_boundary_conditions(physics: PhysicsLayer, device: str):
-    """시간 경계 조건 테스트"""
-    print("\n=== Test 1: Time Boundary Conditions ===")
-    
-    num_waypoints = physics.num_waypoints
-    n_q = physics.n_q
-    
-    # 간단한 waypoints 생성
-    waypoints = torch.zeros(1, num_waypoints * n_q, device=device)
-    q0_init = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    q0_goal = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    
-    q_traj, q_dot_traj = physics.generate_trajectory(waypoints)
-    
-    # RK4 실행
-    try:
-        loss, q_final = physics.simulate_single_rk4(
-            q_traj[0], q_dot_traj[0], q0_init[0], q0_goal[0]
-        )
-        print(f"✓ RK4 실행 성공")
-        print(f"  Final time should be ~{physics.total_time:.3f}s")
-        print(f"  Loss: {loss.item():.6f}")
-        print(f"  Final quaternion: {q_final.cpu().numpy()}")
-    except Exception as e:
-        print(f"✗ RK4 실행 실패: {e}")
-        raise
+def load_csv_tensor(path, device):
+    """Load CSV file as tensor"""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File not found: {path}")
+    data = np.loadtxt(path, delimiter=",", skiprows=1)
+    tensor = torch.tensor(data, device=device, dtype=torch.float32)
+    if tensor.dim() == 1:
+        tensor = tensor.unsqueeze(0)
+    return tensor
 
 
-def test_interpolation_logic(physics: PhysicsLayer, device: str):
-    """보간 로직 테스트"""
-    print("\n=== Test 2: Interpolation Logic ===")
+def load_meta(path):
+    """Load meta information from CSV"""
+    if not os.path.exists(path):
+        print(f"Meta file not found: {path}. Using default total_time=10.0")
+        return 10.0
     
-    num_waypoints = physics.num_waypoints
-    n_q = physics.n_q
-    
-    # 테스트용 waypoints 생성 (명확한 변화)
-    waypoints = torch.randn(1, num_waypoints * n_q, device=device) * 0.1
-    q0_init = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    q0_goal = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    
-    q_traj, q_dot_traj = physics.generate_trajectory(waypoints)
-    
-    # 보간 함수 직접 테스트 (내부 함수이므로 간접적으로 테스트)
-    print(f"  Trajectory shape: {q_traj.shape}")
-    print(f"  Number of steps: {physics.num_steps}")
-    print(f"  Total time: {physics.total_time}s")
-    
-    # 경계값 테스트: t=0, t=total_time
-    print(f"  First trajectory point: {q_traj[0, :3].cpu().numpy()}")
-    print(f"  Last trajectory point: {q_traj[-1, :3].cpu().numpy()}")
-    
-    # RK4가 경계에서 올바르게 작동하는지 확인
-    try:
-        loss, q_final = physics.simulate_single_rk4(
-            q_traj[0], q_dot_traj[0], q0_init[0], q0_goal[0]
-        )
-        print(f"✓ 보간 로직 검증 완료 (Loss: {loss.item():.6f})")
-    except Exception as e:
-        print(f"✗ 보간 로직 검증 실패: {e}")
-        raise
+    df = pd.read_csv(path)
+    if 'total_time' in df.columns:
+        return float(df['total_time'].iloc[0])
+    return 10.0
 
 
-def test_loss_calculation(physics: PhysicsLayer, device: str):
-    """Loss 계산 테스트"""
-    print("\n=== Test 3: Loss Calculation ===")
-    
-    num_waypoints = physics.num_waypoints
-    n_q = physics.n_q
-    
-    waypoints = torch.zeros(1, num_waypoints * n_q, device=device)
-    
-    # 케이스 1: 동일한 초기/목표 자세 (loss가 작아야 함)
-    q0_init = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    q0_goal = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    
-    q_traj, q_dot_traj = physics.generate_trajectory(waypoints)
-    loss1, q_final1 = physics.simulate_single_rk4(
-        q_traj[0], q_dot_traj[0], q0_init[0], q0_goal[0]
-    )
-    
-    print(f"  Case 1 (same init/goal): Loss = {loss1.item():.8f}")
-    print(f"    Final quaternion: {q_final1.cpu().numpy()}")
-    
-    # 케이스 2: 다른 초기/목표 자세 (loss가 커야 함)
-    goal_rpy = [np.pi / 4, 0.0, 0.0]  # 45도 회전
-    goal_quat = R.from_euler("xyz", goal_rpy).as_quat()
-    q0_goal2 = torch.tensor([goal_quat], device=device, dtype=torch.float32)
-    
-    loss2, q_final2 = physics.simulate_single_rk4(
-        q_traj[0], q_dot_traj[0], q0_init[0], q0_goal2[0]
-    )
-    
-    print(f"  Case 2 (different init/goal): Loss = {loss2.item():.8f}")
-    print(f"    Final quaternion: {q_final2.cpu().numpy()}")
-    
-    # Loss 계산 방식: log(epsilon + trace_val)
-    # trace_val이 매우 작으면 (epsilon보다 작으면) log 결과가 음수가 될 수 있음
-    # 이것은 log 함수의 수학적 특성상 정상적인 동작입니다.
-    # 예: log(1e-8 + 1e-10) ≈ log(1e-8) ≈ -18.4
-    
-    # Loss가 합리적인 범위에 있는지 확인
-    # Case 1의 loss가 Case 2보다 작아야 함 (같은 init/goal이므로 오차가 작음)
-    assert loss1.item() < loss2.item(), f"Loss should be smaller for same init/goal. Got loss1={loss1.item():.8f}, loss2={loss2.item():.8f}"
-    
-    # Loss가 유한한 값인지 확인 (inf, nan이 아닌지)
-    assert torch.isfinite(loss1), f"Loss1 should be finite, got {loss1.item()}"
-    assert torch.isfinite(loss2), f"Loss2 should be finite, got {loss2.item()}"
-    
-    # Loss가 너무 작거나 크지 않은지 확인 (합리적인 범위)
-    # log(1e-8) ≈ -18.4, log(10) ≈ 2.3 정도의 범위를 기대
-    if loss1.item() < -50:
-        print(f"    ⚠ Warning: Loss1 is very negative ({loss1.item():.8f}), which may indicate very small error")
-    if loss2.item() < -50:
-        print(f"    ⚠ Warning: Loss2 is very negative ({loss2.item():.8f}), which may indicate very small error")
-    
-    print(f"✓ Loss 계산 검증 완료 (Loss는 log 함수이므로 음수일 수 있음)")
+# Note: quat_to_rot, skew, rot_from_omega are now using physics_layer methods
+# These helper functions are kept for compatibility but should use physics methods
 
 
-def test_rk4_vs_simulate_single(physics: PhysicsLayer, device: str):
-    """RK4와 simulate_single의 상세 비교 테스트"""
-    print("\n=== Test 4: RK4 vs simulate_single Detailed Comparison ===")
-    
-    num_waypoints = physics.num_waypoints
-    n_q = physics.n_q
-    
-    # 여러 케이스로 테스트
-    test_cases = [
-        {
-            "name": "Small rotation",
-            "waypoints_scale": 0.05,
-            "goal_rpy": [np.pi / 20, 0.0, 0.0]
-        },
-        {
-            "name": "Medium rotation",
-            "waypoints_scale": 0.1,
-            "goal_rpy": [np.pi / 8, 0.0, 0.0]
-        },
-        {
-            "name": "Zero waypoints",
-            "waypoints_scale": 0.0,
-            "goal_rpy": [np.pi / 10, 0.0, 0.0]
-        },
-        {
-            "name": "Random waypoints",
-            "waypoints_scale": 0.15,
-            "goal_rpy": [np.pi / 6, np.pi / 12, 0.0]
-        }
-    ]
-    
-    results = []
-    
-    for case in test_cases:
-        print(f"\n  Testing: {case['name']}")
-        
-        # Waypoints 생성
-        if case["waypoints_scale"] == 0.0:
-            waypoints = torch.zeros(1, num_waypoints * n_q, device=device)
-        else:
-            waypoints = torch.randn(1, num_waypoints * n_q, device=device) * case["waypoints_scale"]
-        
-        q0_init = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-        goal_quat = R.from_euler("xyz", case["goal_rpy"]).as_quat()
-        q0_goal = torch.tensor([goal_quat], device=device, dtype=torch.float32)
-        
-        q_traj, q_dot_traj = physics.generate_trajectory(waypoints)
-        
-        # RK4 실행
-        loss_rk4, q_final_rk4 = physics.simulate_single_rk4(
-            q_traj[0], q_dot_traj[0], q0_init[0], q0_goal[0]
-        )
-        
-        # simulate_single 실행
-        loss_single, q_final_single = physics.simulate_single(
-            q_traj[0], q_dot_traj[0], q0_init[0], q0_goal[0]
-        )
-        
-        # 결과 비교
-        loss_diff = abs(loss_rk4.item() - loss_single.item())
-        loss_rel_diff = loss_diff / (loss_single.item() + 1e-10) * 100  # 상대 차이 (%)
-        
-        q_diff_l2 = torch.norm(q_final_rk4 - q_final_single).item()
-        
-        # 쿼터니언 각도 차이 계산 (quaternion distance)
-        q_dot = torch.clamp(torch.abs(torch.dot(q_final_rk4, q_final_single)), -1.0, 1.0)
-        angle_diff_rad = 2 * torch.acos(q_dot).item()
-        angle_diff_deg = np.rad2deg(angle_diff_rad)
-        
-        print(f"    RK4 Loss:        {loss_rk4.item():.8f}")
-        print(f"    Single Loss:     {loss_single.item():.8f}")
-        print(f"    Loss diff:       {loss_diff:.8f} ({loss_rel_diff:.2f}%)")
-        print(f"    Quat L2 diff:    {q_diff_l2:.8f}")
-        print(f"    Angle diff:      {angle_diff_deg:.4f}°")
-        
-        results.append({
-            "case": case["name"],
-            "loss_rk4": loss_rk4.item(),
-            "loss_single": loss_single.item(),
-            "loss_diff": loss_diff,
-            "loss_rel_diff": loss_rel_diff,
-            "q_diff_l2": q_diff_l2,
-            "angle_diff_deg": angle_diff_deg
-        })
-    
-    # 요약 통계
-    print(f"\n  Summary Statistics:")
-    avg_loss_diff = np.mean([r["loss_diff"] for r in results])
-    avg_rel_diff = np.mean([r["loss_rel_diff"] for r in results])
-    avg_angle_diff = np.mean([r["angle_diff_deg"] for r in results])
-    max_angle_diff = np.max([r["angle_diff_deg"] for r in results])
-    
-    print(f"    Average loss difference: {avg_loss_diff:.8f}")
-    print(f"    Average relative diff:  {avg_rel_diff:.2f}%")
-    print(f"    Average angle diff:     {avg_angle_diff:.4f}°")
-    print(f"    Max angle diff:         {max_angle_diff:.4f}°")
-    
-    # 두 방법이 합리적인 범위 내에 있는지 확인
-    # RK4는 더 정확한 적분 방법이므로 차이가 있을 수 있지만, 너무 크면 안됨
-    if max_angle_diff > 10.0:  # 10도 이상 차이나면 경고
-        print(f"    ⚠ Warning: Large angle difference detected!")
+def rot_to_euler(R):
+    """Convert rotation matrix R (3x3) to Euler angles (ZYX order: yaw, pitch, roll)"""
+    sy = torch.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
+    singular = sy < 1e-6
+
+    if not singular:
+        yaw = torch.atan2(R[1, 0], R[0, 0])
+        pitch = torch.atan2(-R[2, 0], sy)
+        roll = torch.atan2(R[2, 1], R[2, 2])
     else:
-        print(f"    ✓ Angle differences are within reasonable range")
-    
-    print(f"✓ 상세 비교 검증 완료 (두 방법은 다른 적분 방법이므로 차이가 있을 수 있음)")
+        yaw = torch.atan2(-R[0, 1], R[1, 1])
+        pitch = torch.atan2(-R[2, 0], sy)
+        roll = torch.zeros_like(yaw)
+
+    return torch.stack([yaw, pitch, roll])
 
 
-def test_quaternion_normalization(physics: PhysicsLayer, device: str):
-    """쿼터니언 정규화 테스트"""
-    print("\n=== Test 5: Quaternion Normalization ===")
+def quat_to_euler(q, physics):
+    """Convert quaternion [x, y, z, w] to Euler angles [yaw, pitch, roll]"""
+    R_mat = physics._quat_to_rot(q)
+    return rot_to_euler(R_mat)
+
+
+def compute_orientation_traj(physics, q_traj, q_dot_traj, q0_init):
+    """
+    Compute body orientation trajectory (Euler angles) from joint trajectory.
+    Uses the same dynamics as PhysicsLayer.simulate_single.
+    """
+    device = physics.device
+    num_steps = physics.num_steps
+
+    R0 = physics.R0
+    r0 = physics.r0
+
+    R_curr = physics._quat_to_rot(q0_init)
+
+    # Vectorized: compute wb for all steps (same as PhysicsLayer.simulate_single)
+    def compute_wb_single_step(qm, qd):
+        """Single step wb calculation"""
+        RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, physics.robot)
+        Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, physics.robot)
+        I0, Im = spart.inertia_projection(R0, RL, physics.robot)
+        M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, physics.robot)
+        H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, physics.robot)
+
+        rhs = -H0m @ qd
+        H0_damped = H0 + physics._damping_term
+        u0_sol = torch.linalg.solve(H0_damped, rhs)
+        wb = u0_sol[:3]
+        return wb
     
-    num_waypoints = physics.num_waypoints
-    n_q = physics.n_q
+    batch_compute_wb = vmap(compute_wb_single_step, in_dims=(0, 0))
+    wb_all = batch_compute_wb(q_traj, q_dot_traj)  # [num_steps, 3]
     
-    waypoints = torch.randn(1, num_waypoints * n_q, device=device) * 0.1
-    q0_init = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    q0_goal = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
+    # Use physics_layer's _rot_from_omega method
+    batch_rot_from_omega = vmap(physics._rot_from_omega, in_dims=(0, None))
+    R_delta_all = batch_rot_from_omega(wb_all, physics.dt)  # [num_steps, 3, 3]
     
+    # Sequentially update R_curr and compute euler
+    eulers = []
+    for t in range(num_steps):
+        R_curr = R_curr @ R_delta_all[t]
+        eulers.append(rot_to_euler(R_curr))
+
+    euler_traj = torch.stack(eulers, dim=0)
+    return euler_traj
+
+
+def load_sim_result(sim_result_path):
+    """
+    Load sim_result.csv from MATLAB simulation.
+    MATLAB format: [time, quat_w, quat_x, quat_y, quat_z, euler_yaw, euler_pitch, euler_roll]
+    Convert to: [x, y, z, w] format for consistency with codebase
+    """
+    if not os.path.exists(sim_result_path):
+        raise FileNotFoundError(f"sim_result.csv not found: {sim_result_path}")
+    
+    data = np.loadtxt(sim_result_path, delimiter=",")
+    
+    # MATLAB format: time, quat[w, x, y, z], euler[3]
+    time = data[:, 0]
+    quat_matlab = data[:, 1:5]  # [w, x, y, z] from MATLAB
+    euler = data[:, 5:8]  # [yaw, pitch, roll] (assuming ZYX order)
+    
+    # Convert MATLAB [w, x, y, z] to [x, y, z, w] format
+    quat = np.zeros_like(quat_matlab)
+    quat[:, 0] = quat_matlab[:, 1]  # x
+    quat[:, 1] = quat_matlab[:, 2]  # y
+    quat[:, 2] = quat_matlab[:, 3]  # z
+    quat[:, 3] = quat_matlab[:, 0]  # w
+    
+    return {
+        'time': time,
+        'quat': quat,  # [x, y, z, w]
+        'euler': euler
+    }
+
+
+def compute_rk4_trajectory(physics, waypoints, q0_start, q0_goal):
+    """
+    Compute trajectory using RK4 simulation.
+    Uses the exact same logic as physics_layer.simulate_single_rk4 but stores trajectory.
+    Returns quaternion and euler angle trajectories.
+    """
+    # Generate trajectory from waypoints
     q_traj, q_dot_traj = physics.generate_trajectory(waypoints)
-    loss, q_final = physics.simulate_single_rk4(
-        q_traj[0], q_dot_traj[0], q0_init[0], q0_goal[0]
-    )
+    q_traj_single = q_traj[0]  # [num_steps, n_q]
+    q_dot_traj_single = q_dot_traj[0]  # [num_steps, n_q]
     
-    # 쿼터니언이 정규화되어 있는지 확인
-    q_norm = torch.norm(q_final).item()
-    print(f"  Final quaternion norm: {q_norm:.6f}")
-    print(f"  Final quaternion: {q_final.cpu().numpy()}")
+    # Use exact same logic as physics_layer.simulate_single_rk4
+    dt_eval = 0.01
+    num_steps_eval = int(physics.total_time / dt_eval)
+    actual_dt = physics.total_time / num_steps_eval if num_steps_eval > 0 else dt_eval
     
-    assert abs(q_norm - 1.0) < 1e-5, f"Quaternion should be normalized, got norm={q_norm}"
-    print(f"✓ 쿼터니언 정규화 검증 완료")
+    # 초기화 (same as physics_layer)
+    R0 = physics.R0
+    r0 = physics.r0
+    q_curr = q0_start[0].clone()
+    q_goal = q0_goal[0].clone()
+    
+    def normalize_quat(q):
+        return q / (torch.linalg.norm(q) + 1e-8)
+    
+    # --- Helper: 특정 시간 t에서의 입력(qm, qd) 보간 함수 (same as physics_layer) ---
+    def get_interpolated_input(t):
+        t_clamped = max(0.0, min(float(t), physics.total_time - 1e-10))
+        if physics.num_steps > 1:
+            idx_float = t_clamped * (physics.num_steps - 1) / physics.total_time
+        else:
+            idx_float = 0.0
+        idx_floor = int(idx_float)
+        idx_ceil = min(idx_floor + 1, physics.num_steps - 1)
+        alpha = idx_float - idx_floor
+        qm_interp = (1 - alpha) * q_traj_single[idx_floor] + alpha * q_traj_single[idx_ceil]
+        qd_interp = (1 - alpha) * q_dot_traj_single[idx_floor] + alpha * q_dot_traj_single[idx_ceil]
+        return qm_interp, qd_interp
+    
+    # --- Helper: 현재 쿼터니언(q)과 시간(t)에서 각속도(wb) 계산 (same as physics_layer) ---
+    def compute_omega(current_q, current_t):
+        # 입력 보간값 가져오기
+        qm_sub, qd_sub = get_interpolated_input(current_t)
+        
+        # SPART Dynamics 재계산 (same as physics_layer)
+        RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm_sub, physics.robot)
+        Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, physics.robot)
+        I0, Im = spart.inertia_projection(R0, RL, physics.robot)
+        M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, physics.robot)
+        H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, physics.robot)
+        
+        # Constraint Solver (use same damping as physics_layer)
+        rhs = -H0m @ qd_sub
+        H0_damped = H0 + 1e-6 * physics.eye6  # Use physics_layer's eye6
+        u0_sol = torch.linalg.solve(H0_damped, rhs)
+        return u0_sol[:3]  # wb
+    
+    quat_traj_rk4 = []
+    euler_traj_rk4 = []
+    current_time = 0.0
+    
+    # Sample trajectory at regular intervals (every 10 steps = 0.1s)
+    sample_interval = max(1, num_steps_eval // physics.num_steps)
+    
+    # --- Main Loop (same as physics_layer) ---
+    for step in range(num_steps_eval):
+        dt_step = actual_dt
+        if step == num_steps_eval - 1:
+            remaining_time = physics.total_time - current_time
+            if remaining_time > 1e-10:
+                dt_step = remaining_time
+        
+        # RK4 Integration (exact same as physics_layer)
+        w1 = compute_omega(q_curr, current_time)
+        k1 = spart.quat_dot(q_curr, w1)
+        
+        q_k2 = normalize_quat(q_curr + 0.5 * dt_step * k1)
+        w2 = compute_omega(q_k2, current_time + 0.5 * dt_step)
+        k2 = spart.quat_dot(q_k2, w2)
+        
+        q_k3 = normalize_quat(q_curr + 0.5 * dt_step * k2)
+        w3 = compute_omega(q_k3, current_time + 0.5 * dt_step)
+        k3 = spart.quat_dot(q_k3, w3)
+        
+        q_k4 = normalize_quat(q_curr + dt_step * k3)
+        w4 = compute_omega(q_k4, current_time + dt_step)
+        k4 = spart.quat_dot(q_k4, w4)
+        
+        q_curr = normalize_quat(q_curr + (dt_step / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4))
+        current_time += dt_step
+        
+        # Store at sample intervals
+        if step % sample_interval == 0 or step == num_steps_eval - 1:
+            quat_traj_rk4.append(q_curr.cpu().numpy())
+            R_curr = physics._quat_to_rot(q_curr)
+            euler_curr = rot_to_euler(R_curr)
+            euler_traj_rk4.append(euler_curr.cpu().numpy())
+        
+        if current_time >= physics.total_time - 1e-10:
+            break
+    
+    quat_traj_rk4 = np.array(quat_traj_rk4)  # [num_samples, 4]
+    euler_traj_rk4 = np.array(euler_traj_rk4)  # [num_samples, 3]
+    time_rk4 = np.linspace(0.0, physics.total_time, len(quat_traj_rk4))
+    
+    # Compute final loss (same as physics_layer)
+    R_curr = physics._quat_to_rot(q_curr)
+    R_goal = physics._quat_to_rot(q_goal)
+    R_diff = R_curr - R_goal
+    R_diff_T = R_diff.T
+    R_diff_sq = R_diff_T @ R_diff
+    trace_val = 0.5 * torch.trace(R_diff_sq)
+    epsilon = 1e-8
+    loss = torch.log(epsilon + trace_val)
+    
+    return {
+        'time': time_rk4,
+        'quat': quat_traj_rk4,
+        'euler': euler_traj_rk4,
+        'loss': loss.item(),
+        'q_final': q_curr.cpu().numpy()
+    }
 
 
-def test_edge_cases(physics: PhysicsLayer, device: str):
-    """엣지 케이스 테스트"""
-    print("\n=== Test 6: Edge Cases ===")
+def plot_comparison(sim_result, opt_result, rk4_result, save_path):
+    """Plot comparison of three results"""
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     
-    num_waypoints = physics.num_waypoints
-    n_q = physics.n_q
+    # Quaternion comparison
+    quat_labels = ['qx', 'qy', 'qz', 'qw']
+    for i in range(4):
+        ax = axes[0, i] if i < 3 else axes[1, 0]
+        ax.plot(sim_result['time'], sim_result['quat'][:, i], 'b-', label='MATLAB Sim', linewidth=2)
+        ax.plot(opt_result['time'], opt_result['quat'][:, i], 'r--', label='opt_nn_lbfgs', linewidth=2)
+        ax.plot(rk4_result['time'], rk4_result['quat'][:, i], 'g:', label='RK4', linewidth=2)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel(quat_labels[i])
+        ax.set_title(f'Quaternion {quat_labels[i]}')
+        ax.legend()
+        ax.grid(True)
     
-    # 케이스 1: 모든 waypoint가 0
-    waypoints = torch.zeros(1, num_waypoints * n_q, device=device)
-    q0_init = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    q0_goal = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
+    # Euler angle comparison
+    euler_labels = ['Yaw', 'Pitch', 'Roll']
+    for i in range(3):
+        ax = axes[1, i+1] if i < 2 else axes[0, 2]
+        ax.plot(sim_result['time'], np.rad2deg(sim_result['euler'][:, i]), 'b-', label='MATLAB Sim', linewidth=2)
+        ax.plot(opt_result['time'], np.rad2deg(opt_result['euler'][:, i]), 'r--', label='opt_nn_lbfgs', linewidth=2)
+        ax.plot(rk4_result['time'], np.rad2deg(rk4_result['euler'][:, i]), 'g:', label='RK4', linewidth=2)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel(f'{euler_labels[i]} (deg)')
+        ax.set_title(f'Euler Angle: {euler_labels[i]}')
+        ax.legend()
+        ax.grid(True)
     
-    q_traj, q_dot_traj = physics.generate_trajectory(waypoints)
-    try:
-        loss, q_final = physics.simulate_single_rk4(
-            q_traj[0], q_dot_traj[0], q0_init[0], q0_goal[0]
-        )
-        print(f"  ✓ Zero waypoints: Loss = {loss.item():.6f}")
-    except Exception as e:
-        print(f"  ✗ Zero waypoints failed: {e}")
-        raise
-    
-    # 케이스 2: 큰 회전
-    goal_rpy = [np.pi, 0.0, 0.0]  # 180도 회전
-    goal_quat = R.from_euler("xyz", goal_rpy).as_quat()
-    q0_goal2 = torch.tensor([goal_quat], device=device, dtype=torch.float32)
-    
-    try:
-        loss, q_final = physics.simulate_single_rk4(
-            q_traj[0], q_dot_traj[0], q0_init[0], q0_goal2[0]
-        )
-        print(f"  ✓ Large rotation: Loss = {loss.item():.6f}")
-    except Exception as e:
-        print(f"  ✗ Large rotation failed: {e}")
-        raise
-    
-    print(f"✓ 엣지 케이스 검증 완료")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    print(f"Saved comparison plot to {save_path}")
 
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"=== RK4 Implementation Test ({device}) ===")
+    print(f"=== RK4 Comparison Script ({device}) ===")
     
-    # Robot 및 PhysicsLayer 설정
-    urdf_path = os.path.join(ROOT_DIR, "assets/SC_ur10e.urdf")
-    if not os.path.exists(urdf_path):
-        print(f"Warning: URDF file not found at {urdf_path}")
-        print("Please ensure the URDF file exists.")
+    # Paths
+    result_dir = os.path.join(ROOT_DIR, "outputs/results")
+    opt_dir = os.path.join(result_dir, "opt_nn_lbfgs")
+    sim_result_path = os.path.join(result_dir, "sim_result.csv")
+    
+    # 1. Load sim_result.csv (MATLAB simulation)
+    print("\n[1] Loading sim_result.csv...")
+    try:
+        sim_result = load_sim_result(sim_result_path)
+        print(f"  Loaded {len(sim_result['time'])} time steps")
+    except FileNotFoundError as e:
+        print(f"  Warning: {e}")
+        print("  Skipping MATLAB simulation comparison")
+        sim_result = None
+    
+    # 2. Load opt_nn_lbfgs results
+    print("\n[2] Loading opt_nn_lbfgs results...")
+    try:
+        waypoints = load_csv_tensor(os.path.join(opt_dir, "waypoints.csv"), device)
+        q0_start = load_csv_tensor(os.path.join(opt_dir, "q0_start.csv"), device)
+        q0_goal = load_csv_tensor(os.path.join(opt_dir, "q0_goal.csv"), device)
+        total_time = load_meta(os.path.join(opt_dir, "meta.csv"))
+        body_orientation = pd.read_csv(os.path.join(opt_dir, "body_orientation.csv"))
+        
+        print(f"  Loaded waypoints: shape {waypoints.shape}")
+        print(f"  Total time: {total_time}s")
+    except FileNotFoundError as e:
+        print(f"  Error: {e}")
         return
     
+    # 3. Setup Robot & Physics
+    print("\n[3] Setting up robot and physics...")
+    urdf_path = os.path.join(ROOT_DIR, "assets/SC_ur10e.urdf")
     robot, _ = urdf2robot(urdf_path, verbose_flag=False, device=device)
-    NUM_WAYPOINTS = 3
-    TOTAL_TIME = 1.0
+    n_q = robot["n_q"]
     
-    physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
+    num_elements = waypoints.numel()
+    if num_elements % n_q != 0:
+        print(f"Error: Waypoints size {num_elements} is not divisible by n_q={n_q}")
+        return
+    num_waypoints = num_elements // n_q
     
-    print(f"Configuration:")
-    print(f"  Device: {device}")
-    print(f"  Number of waypoints: {NUM_WAYPOINTS}")
-    print(f"  Total time: {TOTAL_TIME}s")
-    print(f"  Number of steps: {physics.num_steps}")
-    print(f"  Joints (n_q): {physics.n_q}")
+    print(f"  Waypoints: {num_waypoints}, Joints: {n_q}")
     
-    # 테스트 실행
-    try:
-        test_time_boundary_conditions(physics, device)
-        test_interpolation_logic(physics, device)
-        test_loss_calculation(physics, device)
-        test_rk4_vs_simulate_single(physics, device)
-        test_quaternion_normalization(physics, device)
-        test_edge_cases(physics, device)
+    physics = PhysicsLayer(robot, num_waypoints, total_time, device)
+    
+    # 4. Generate trajectory from opt_nn_lbfgs waypoints
+    print("\n[4] Generating trajectory from opt_nn_lbfgs waypoints...")
+    q_traj, q_dot_traj = physics.generate_trajectory(waypoints)
+    q_traj_single = q_traj[0]
+    q_dot_traj_single = q_dot_traj[0]
+    
+    # Compute orientation trajectory
+    euler_traj_opt = compute_orientation_traj(physics, q_traj_single, q_dot_traj_single, q0_start[0])
+    
+    # Convert euler trajectory to quaternion trajectory
+    num_steps = q_traj_single.shape[0]
+    time_opt = np.linspace(0.0, total_time, num_steps)
+    
+    # Compute quaternion trajectory from euler trajectory
+    # Use the same approach as compute_orientation_traj but track quaternions
+    quat_traj_opt = []
+    R_curr = physics._quat_to_rot(q0_start[0])
+    
+    # Use the same vectorized approach as compute_orientation_traj
+    R0 = physics.R0
+    r0 = physics.r0
+    
+    def compute_wb_single_step(qm, qd):
+        """Single step wb calculation"""
+        RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, robot)
+        Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, robot)
+        I0, Im = spart.inertia_projection(R0, RL, robot)
+        M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, robot)
+        H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, robot)
+        rhs = -H0m @ qd
+        H0_damped = H0 + physics._damping_term
+        u0_sol = torch.linalg.solve(H0_damped, rhs)
+        wb = u0_sol[:3]
+        return wb
+    
+    batch_compute_wb = vmap(compute_wb_single_step, in_dims=(0, 0))
+    wb_all = batch_compute_wb(q_traj_single, q_dot_traj_single)  # [num_steps, 3]
+    
+    batch_rot_from_omega = vmap(physics._rot_from_omega, in_dims=(0, None))
+    R_delta_all = batch_rot_from_omega(wb_all, physics.dt)  # [num_steps, 3, 3]
+    
+    # Sequentially update R_curr and convert to quaternion
+    for t in range(num_steps):
+        R_curr = R_curr @ R_delta_all[t]
+        q_curr = physics._rot_to_quat(R_curr)
+        quat_traj_opt.append(q_curr.cpu().numpy())
+    
+    quat_traj_opt = np.array(quat_traj_opt)
+    euler_traj_opt_np = euler_traj_opt.cpu().numpy()
+    
+    opt_result = {
+        'time': time_opt,
+        'quat': quat_traj_opt,
+        'euler': euler_traj_opt_np
+    }
+    
+    # 5. Run RK4 simulation
+    print("\n[5] Running RK4 simulation...")
+    
+    # First, verify using physics_layer's simulate_single_rk4 directly
+    q_traj_check, q_dot_traj_check = physics.generate_trajectory(waypoints)
+    loss_rk4_direct, q_final_rk4_direct = physics.simulate_single_rk4(
+        q_traj_check[0], q_dot_traj_check[0], q0_start[0], q0_goal[0]
+    )
+    print(f"  Direct RK4 (physics_layer):")
+    print(f"    Loss: {loss_rk4_direct.item():.8f}")
+    print(f"    Final quaternion: {q_final_rk4_direct.cpu().numpy()}")
+    
+    # Then compute full trajectory
+    rk4_result = compute_rk4_trajectory(physics, waypoints, q0_start, q0_goal)
+    print(f"  Trajectory RK4:")
+    print(f"    Loss: {rk4_result['loss']:.8f}")
+    print(f"    Final quaternion: {rk4_result['q_final']}")
+    
+    # Compare
+    q_diff = np.linalg.norm(q_final_rk4_direct.cpu().numpy() - rk4_result['q_final'])
+    print(f"  Difference between direct and trajectory: {q_diff:.8f}")
+    if q_diff > 1e-4:
+        print(f"  WARNING: Large difference detected! Trajectory computation may be incorrect.")
+    
+    # 6. Compare results
+    print("\n[6] Comparing results...")
+    
+    if sim_result is not None:
+        print("\n=== Comparison Summary ===")
+        print(f"MATLAB Sim:     {len(sim_result['time'])} steps")
+        print(f"opt_nn_lbfgs:   {len(opt_result['time'])} steps")
+        print(f"RK4:            {len(rk4_result['time'])} steps")
         
-        print("\n" + "="*50)
-        print("✓ All tests passed!")
-        print("="*50)
+        # Final orientation comparison
+        print("\n=== Final Orientation Comparison ===")
+        print("MATLAB Sim (final):")
+        print(f"  Quaternion: {sim_result['quat'][-1]}")
+        print(f"  Euler (deg): {(sim_result['euler'][-1])}")
         
-    except Exception as e:
-        print("\n" + "="*50)
-        print(f"✗ Test failed: {e}")
-        print("="*50)
-        import traceback
-        traceback.print_exc()
-        raise
+        print("\nopt_nn_lbfgs (final):")
+        print(f"  Quaternion: {opt_result['quat'][-1]}")
+        print(f"  Euler (deg): {np.rad2deg(opt_result['euler'][-1])}")
+        
+        print("\nRK4 (final):")
+        print(f"  Quaternion: {rk4_result['q_final']}")
+        print(f"  Euler (deg): {np.rad2deg(rk4_result['euler'][-1])}")
+        
+        # Plot comparison
+        save_path = os.path.join(result_dir, "rk4_comparison.png")
+        plot_comparison(sim_result, opt_result, rk4_result, save_path)
+    else:
+        print("\n=== opt_nn_lbfgs vs RK4 Comparison ===")
+        print(f"opt_nn_lbfgs (final):")
+        print(f"  Quaternion: {opt_result['quat'][-1]}")
+        print(f"  Euler (deg): {np.rad2deg(opt_result['euler'][-1])}")
+        
+        print("\nRK4 (final):")
+        print(f"  Quaternion: {rk4_result['q_final']}")
+        print(f"  Euler (deg): {np.rad2deg(rk4_result['euler'][-1])}")
+        
+        # Compute differences
+        quat_diff = np.linalg.norm(opt_result['quat'][-1] - rk4_result['q_final'])
+        euler_diff = np.linalg.norm(np.rad2deg(opt_result['euler'][-1] - rk4_result['euler'][-1]))
+        print(f"\nDifference:")
+        print(f"  Quaternion L2 norm: {quat_diff:.6f}")
+        print(f"  Euler L2 norm (deg): {euler_diff:.4f}")
+    
+    print("\n=== Done ===")
 
 
 if __name__ == "__main__":
     main()
-

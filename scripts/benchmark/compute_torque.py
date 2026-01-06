@@ -86,12 +86,13 @@ def generate_trajectory_with_accel(
     physics: PhysicsLayer, waypoints_flat: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    PhysicsLayer.generate_trajectory()와 동일한 4분절 half-cosine 궤적을 사용하되,
+    PhysicsLayer.generate_trajectory()와 동일한 4분절 5차 다항식(quintic) 궤적을 사용하되,
     basis를 해석적으로 미분해서 q_ddot까지 반환.
 
-    - position basis:      b(t)  = 0.5 * (1 - cos(pi * t))
-    - velocity basis:      b'(t) = 0.5 * pi * sin(pi * t)
-    - accel basis:         b''(t)= 0.5 * pi^2 * cos(pi * t)
+    Quintic basis (t in [0,1]):
+      - position basis:      b(t)  = 6 t^5 - 15 t^4 + 10 t^3
+      - velocity basis:      b'(t) = 30 t^4 - 60 t^3 + 30 t^2
+      - accel basis:         b''(t)= 120 t^3 - 180 t^2 + 60 t
 
     여기서 t는 분절 내 정규화 시간 [0,1].
     실제 시간 미분은 segment_time 스케일을 적용:
@@ -130,17 +131,22 @@ def generate_trajectory_with_accel(
         seg_steps = steps_per_segment + (1 if seg < remainder else 0)
         t_seg = torch.linspace(0, 1, seg_steps, device=device, dtype=dtype)  # [seg_steps]
 
-        # position
-        basis = 0.5 * (1.0 - torch.cos(torch.pi * t_seg))  # [seg_steps]
+        # quintic position basis
+        t = t_seg
+        t2 = t * t
+        t3 = t2 * t
+        t4 = t3 * t
+        t5 = t4 * t
+        basis = 6.0 * t5 - 15.0 * t4 + 10.0 * t3  # [seg_steps]
         q_seg = q_start.unsqueeze(1) + dq * basis.unsqueeze(0).unsqueeze(-1)
 
         # velocity (w.r.t normalized time)
-        d_basis = 0.5 * torch.pi * torch.sin(torch.pi * t_seg)  # [seg_steps]
+        d_basis = 30.0 * t4 - 60.0 * t3 + 30.0 * t2  # [seg_steps]
         qd_seg = dq * d_basis.unsqueeze(0).unsqueeze(-1)
         qd_seg = qd_seg * inv_seg_t
 
         # acceleration (w.r.t normalized time)
-        dd_basis = 0.5 * (torch.pi ** 2) * torch.cos(torch.pi * t_seg)  # [seg_steps]
+        dd_basis = 120.0 * t3 - 180.0 * t2 + 60.0 * t  # [seg_steps]
         qdd_seg = dq * dd_basis.unsqueeze(0).unsqueeze(-1)
         qdd_seg = qdd_seg * inv_seg_t2
 
