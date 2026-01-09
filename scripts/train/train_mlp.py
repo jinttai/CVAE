@@ -60,8 +60,10 @@ def main():
     TOTAL_TIME = 10.0
     NUM_EPOCHS = 2000
     
-    # Maximum joint angle penalty weight
-    MAX_JOINT_WEIGHT = 0.01  # Weight for maximum joint angle regularization
+    # Joint regularization weights
+    JOINT_SQUARED_WEIGHT = 0.01  # Weight for mean of joint^2 regularization
+    JOINT_CHANGE_WEIGHT = 0.01  # Weight for joint change penalty between consecutive waypoints
+    MAX_JOINT_WEIGHT = 0.01  # Weight for maximum joint angle penalty
 
     model = MLP(COND_DIM, OUTPUT_DIM, joint_limits=robot['joint_limits']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -111,17 +113,13 @@ def main():
 
         waypoints_pred = model(condition)
 
-        # Physics Simulation & Loss
-        physics_loss = physics.calculate_loss(waypoints_pred, q0_start, q0_goal)
-        
-        # Maximum joint angle penalty (encourage smaller joint angles)
-        waypoints_reshaped = waypoints_pred.view(BATCH_SIZE, NUM_WAYPOINTS, robot["n_q"])
-        # For each sample: max over all waypoints and joints
-        max_joint_angle_per_sample = waypoints_reshaped.abs().view(BATCH_SIZE, -1).max(dim=1)[0]  # [BATCH_SIZE]
-        max_joint_penalty = max_joint_angle_per_sample.mean()  # Average over batch
-        
-        # Combined loss
-        loss = physics_loss + MAX_JOINT_WEIGHT * max_joint_penalty
+        # Total loss calculation (physics loss + penalties) from PhysicsLayer
+        loss, loss_dict = physics.calculate_total_loss(
+            waypoints_pred, q0_start, q0_goal,
+            joint_squared_weight=JOINT_SQUARED_WEIGHT,
+            joint_change_weight=JOINT_CHANGE_WEIGHT,
+            max_joint_weight=MAX_JOINT_WEIGHT
+        )
 
         # Check for NaN and skip update if found
         if torch.isnan(loss) or torch.isinf(loss):

@@ -90,11 +90,34 @@
 5. 10 epoch마다 고정 목표점에 대한 검증 및 TensorBoard 시각화
 
 #### 저장 파일
-- **모델 가중치**: `outputs/weights/cvae_debug/v4.pth`
+- **모델 가중치**: `outputs/weights/cvae_debug/v5_joint_change.pth` (v5)
 - **학습 곡선 CSV**: `outputs/plots/cvae_training_curve/v4.csv`
   - 컬럼: `epoch`, `train_loss`, `epoch_duration`, `val_loss`
 - **학습 곡선 이미지**: `outputs/plots/cvae_training_curve/v4.png`
 - **TensorBoard 로그**: `outputs/logs/cvae_v4/`
+
+#### 손실 함수 (v5)
+- **Physics Loss**: 물리 시뮬레이션 기반 자세 오차 (Chordal distance, log scale)
+- **Joint Squared Penalty**: 관절 각도의 제곱 평균
+  ```
+  joint_squared_penalty = mean(waypoints^2) * JOINT_SQUARED_WEIGHT
+  ```
+  - `JOINT_SQUARED_WEIGHT = 0.01`
+- **Joint Change Penalty**: 연속된 waypoint 간 관절 변화량의 제곱 평균
+  ```
+  joint_diff = waypoints[:, 1:, :] - waypoints[:, :-1, :]
+  joint_change_penalty = mean(joint_diff^2) * JOINT_CHANGE_WEIGHT
+  ```
+  - `JOINT_CHANGE_WEIGHT = 0.01`
+- **Total Loss**:
+  ```
+  loss = physics_loss + joint_squared_penalty + joint_change_penalty
+  ```
+
+**변경 이력 (v5)**:
+- 기존: 최대 관절 각도 패널티 (`max(|waypoints|) * MAX_JOINT_WEIGHT`)
+- 변경: 관절 제곱 평균 패널티 + 연속 waypoint 간 변화량 패널티
+- 목적: 더 부드러운 궤적 생성 및 작은 관절 각도 유도
 
 ### MLP 학습 (`scripts/train/train_mlp.py`)
 
@@ -144,13 +167,13 @@
      - AdamW: `lr=1e-2`
      - LBFGS: `lr=1.0`, `max_iter=20`, `history_size=10`, `line_search_fn="strong_wolfe"`
 
-#### 특징
-- CUDA에서 빠른 inference 수행
-- CPU에서 안정적인 최적화 수행
-- 여러 샘플 중 최적 초기값 선택으로 더 나은 결과
+#### 특징 (v5)
+- CUDA에서 전체 프로세스 수행 (inference + optimization)
+- 여러 샘플(기본 1024개) 중 최적 초기값 선택으로 더 나은 결과
+- 동일한 손실 함수로 학습과 최적화 일관성 유지
 
 #### 저장 파일
-- **궤적 플롯**: `outputs/results/opt_nn_lbfgs/cvae_lbfgs_traj_cpu_opt.png`
+- **궤적 플롯**: `outputs/results/opt_nn_lbfgs/cvae_lbfgs_traj_gpu_opt.png`
 - **CSV 파일들**:
   - `q_traj.csv`: Joint position trajectory
   - `q_dot_traj.csv`: Joint velocity trajectory
@@ -271,11 +294,16 @@ tensorboard --logdir outputs/logs/mlp_v4
 
 | 파라미터 | AdamW | LBFGS |
 |---------|-------|-------|
-| Learning Rate | 1e-2 | 1.0 |
-| Max Iterations | - | 20-50 |
-| History Size | - | 10-100 |
+| Learning Rate | 1e-2 | 1e-3 |
+| Max Iterations | - | 20 |
+| History Size | - | - |
 | Line Search | - | "strong_wolfe" |
-| Device | CPU | CPU |
+| Device | GPU | GPU (v5) |
+| Num Samples | - | 1024 (기본값) |
+
+**참고 (v5)**:
+- CVAE 기반 최적화는 GPU에서 전체 프로세스 수행 (CUDA)
+- LBFGS 최적화의 learning rate가 1e-3으로 변경 (더 안정적)
 
 ---
 
@@ -336,17 +364,73 @@ R_curr = R_curr @ R_delta                  # 회전행렬 곱셈
 
 ### 손실 함수
 
+#### Physics Loss (물리 시뮬레이션 손실)
 Chordal distance 기반 손실:
 ```
-R_err = R_goal^T @ R_final
-chordal_dist_sq = 3 - trace(R_err)
-loss = log(chordal_dist_sq + ε)
+R_diff = R_final - R_goal
+R_diff_sq = R_diff^T @ R_diff
+trace_val = 0.5 * trace(R_diff_sq)
+physics_loss = log(ε + trace_val)
 ```
+- `ε = 1e-8`
+
+#### 정규화 손실 (v5: Joint Squared + Joint Change)
+**1. Joint Squared Penalty** (관절 각도의 제곱 평균):
+```
+mean_joint_squared = mean(waypoints^2)
+joint_squared_penalty = mean_joint_squared * JOINT_SQUARED_WEIGHT
+```
+- 모든 waypoint의 모든 관절 각도 제곱의 평균
+- 작은 관절 각도를 유도
+
+**2. Joint Change Penalty** (연속 waypoint 간 변화량):
+```
+joint_diff = waypoints[:, 1:, :] - waypoints[:, :-1, :]
+mean_joint_change_squared = mean(joint_diff^2)
+joint_change_penalty = mean_joint_change_squared * JOINT_CHANGE_WEIGHT
+```
+- 인접한 waypoint 간 관절 각도 차이의 제곱 평균
+- 부드러운 궤적(작은 변화량) 유도
+
+**총 손실 (v5)**:
+```
+total_loss = physics_loss + joint_squared_penalty + joint_change_penalty
+```
+
+**가중치**:
+- `JOINT_SQUARED_WEIGHT = 0.01`
+- `JOINT_CHANGE_WEIGHT = 0.01`
+
+---
+
+## 버전 정보
+
+### v5 (현재 버전): Joint Change Penalty
+**변경 사항**:
+- **손실 함수 개선**:
+  - 기존: 최대 관절 각도 패널티 (`max(|waypoints|)`)
+  - 변경: 관절 제곱 평균 + 연속 waypoint 간 변화량 패널티
+  - 목적: 더 부드러운 궤적 생성 및 작은 관절 각도 유도
+- **최적화 프로세스**:
+  - 전체 프로세스를 GPU(CUDA)에서 수행
+  - LBFGS learning rate: 1e-3 (더 안정적)
+  - 샘플 수: 기본 1024개
+- **학습 및 최적화 간 손실 함수 일관성 유지**
+
+**파일명**:
+- 모델 가중치: `outputs/weights/cvae_debug/v5_joint_change.pth`
+- 최적화 결과: `outputs/results/opt_nn_lbfgs/cvae_lbfgs_traj_gpu_opt.png`
+
+### v4 (이전 버전)
+- 최대 관절 각도 패널티 사용 (`MAX_JOINT_WEIGHT`)
+- CPU에서 최종 최적화 수행
+- 모델 가중치: `v4.pth`
 
 ---
 
 ## 참고사항
 
-- 학습 및 최적화는 주로 CUDA GPU를 사용하지만, 최종 정밀 최적화는 CPU에서 수행됩니다.
-- Joint limits는 모델에 자동으로 적용되어 출력이 관절 한계 내에 있도록 보장합니다.
+- 학습 및 최적화는 CUDA GPU를 사용합니다 (v5).
+- Joint limits는 모델에 자동으로 적용되어 출력이 관절 한계 내에 있도록 보장됩니다.
 - 검증은 10 epoch마다 수행되며, TensorBoard에 궤적 시각화가 기록됩니다.
+- v5에서는 학습과 최적화에서 동일한 손실 함수를 사용하여 일관성을 보장합니다.

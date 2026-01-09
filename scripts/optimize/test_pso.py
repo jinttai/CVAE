@@ -140,7 +140,7 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     axes[0].set_title(f"{title} - Joint Angles (Cubic Spline)")
     axes[0].set_ylabel("Rad")
     axes[0].grid(True)
-    axes[0].legend(loc="right", fontsize="small")
+    axes[0].legend(loc="upper left", fontsize=8)
 
     # 2) Joint Velocities
     for i in range(q_dot_traj.shape[1]):
@@ -160,7 +160,7 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     axes[2].set_xlabel("Time [s]")
     axes[2].set_ylabel("Angle [deg]")
     axes[2].grid(True)
-    axes[2].legend(loc="right", fontsize="small")
+    axes[2].legend(loc="upper left", fontsize=8)
 
     plt.tight_layout()
     plt.savefig(save_path)

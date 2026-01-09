@@ -87,18 +87,31 @@ class PhysicsLayer:
         q_dot = dq * d_basis.unsqueeze(0).unsqueeze(-1)
         return q_dot
 
-    def generate_trajectory(self, waypoints_flat):
+    def generate_trajectory(self, waypoints_flat, q_start=None, q_end=None):
         """
         [Batch, Waypoints*Joints] -> [Batch, Steps, Joints] (Pos, Vel)
-        4분절 5차 다항식(quintic): 시작점(0) + 중간 waypoint 3개 + 끝점(0)
+        4분절 5차 다항식(quintic): 시작점 + 중간 waypoint 3개 + 끝점
         각 분절의 양 끝에서 속도, 가속도가 0
+        
+        Args:
+            waypoints_flat: [batch_size, num_waypoints * n_q] flattened waypoints
+            q_start: [batch_size, n_q] 시작 관절 각도 (None이면 0으로 설정)
+            q_end: [batch_size, n_q] 목표 관절 각도 (None이면 0으로 설정)
         """
         batch_size = waypoints_flat.size(0)
         w_mid = waypoints_flat.view(batch_size, self.num_waypoints, self.n_q)
 
-        # 시작점(0)과 끝점(0)은 고정
-        zeros = torch.zeros(batch_size, 1, self.n_q, device=self.device)
-        w_full = torch.cat([zeros, w_mid, zeros], dim=1)  # [B, 5, n_q]: q0, w1, w2, w3, q4
+        # 시작점과 끝점 설정
+        if q_start is None:
+            q_start = torch.zeros(batch_size, self.n_q, device=self.device)
+        if q_end is None:
+            q_end = torch.zeros(batch_size, self.n_q, device=self.device)
+        
+        # q_start와 q_end를 [B, 1, n_q] 형태로 변환
+        q_start = q_start.unsqueeze(1) if q_start.dim() == 2 else q_start.view(batch_size, 1, self.n_q)
+        q_end = q_end.unsqueeze(1) if q_end.dim() == 2 else q_end.view(batch_size, 1, self.n_q)
+        
+        w_full = torch.cat([q_start, w_mid, q_end], dim=1)  # [B, 5, n_q]: q0, w1, w2, w3, q4
 
         # 전체 시간을 4분절로 나눔
         num_segments = self.num_waypoints + 1  # 4분절
@@ -484,16 +497,104 @@ class PhysicsLayer:
         loss = torch.log(epsilon + trace_val)
         return loss, q_curr
 
-    def calculate_loss(self, waypoints_flat, q0_init, q0_goal):
+    def calculate_loss(self, waypoints_flat, q0_init, q0_goal, q_start_joint=None, q_end_joint=None):
         """
         Batched Physics Simulation using vmap (Rotation Matrix Version)
+        Returns only physics loss (for backward compatibility)
+        
+        Args:
+            waypoints_flat: [batch_size, num_waypoints * n_q] flattened waypoints
+            q0_init: [batch_size, 4] initial quaternion
+            q0_goal: [batch_size, 4] goal quaternion
+            q_start_joint: [batch_size, n_q] starting joint angles (optional)
+            q_end_joint: [batch_size, n_q] goal joint angles (optional)
         """
-        q_traj, q_dot_traj = self.generate_trajectory(waypoints_flat)
+        q_traj, q_dot_traj = self.generate_trajectory(waypoints_flat, q_start=q_start_joint, q_end=q_end_joint)
 
         # simulate_single 을 배치 차원에 대해 병렬화
         batch_sim_fn = vmap(self.simulate_single, in_dims=(0, 0, 0, 0))
         # Now returns (loss_batch, final_q_batch)
         loss_batch, _ = batch_sim_fn(q_traj, q_dot_traj, q0_init, q0_goal)
         return loss_batch.mean()
+
+    def calculate_total_loss(self, waypoints_flat, q0_init, q0_goal, 
+                            joint_squared_weight=0.01, joint_change_weight=0.01, 
+                            max_joint_weight=0.01, return_mean=True, q_start_joint=None, q_end_joint=None):
+        """
+        Calculate total loss including physics loss, joint squared penalty, joint change penalty, and max joint angle penalty.
+        
+        Args:
+            waypoints_flat: [batch_size, num_waypoints * n_q] flattened waypoints
+            q0_init: [batch_size, 4] initial quaternion
+            q0_goal: [batch_size, 4] goal quaternion
+            joint_squared_weight: weight for mean of joint^2 penalty
+            joint_change_weight: weight for joint change penalty between consecutive waypoints
+            max_joint_weight: weight for maximum joint angle penalty
+            return_mean: if True, return mean over batch (scalar); if False, return per-sample losses [batch_size]
+            q_start_joint: [batch_size, n_q] starting joint angles (optional)
+            q_end_joint: [batch_size, n_q] goal joint angles (optional)
+            
+        Returns:
+            total_loss: scalar tensor (if return_mean=True) or [batch_size] tensor (if return_mean=False)
+            loss_dict: dictionary with individual loss components for logging
+                - 'physics_loss': physics simulation loss (scalar or [batch_size])
+                - 'joint_squared_penalty': mean(waypoints^2) * joint_squared_weight (scalar or [batch_size])
+                - 'joint_change_penalty': mean(diff^2) * joint_change_weight (scalar or [batch_size])
+                - 'max_joint_penalty': max(|waypoints|) * max_joint_weight (scalar or [batch_size])
+                - 'total_loss': total loss (scalar or [batch_size])
+        """
+        # Physics loss (per sample)
+        q_traj, q_dot_traj = self.generate_trajectory(waypoints_flat, q_start=q_start_joint, q_end=q_end_joint)
+        batch_sim_fn = vmap(self.simulate_single, in_dims=(0, 0, 0, 0))
+        physics_loss_batch, _ = batch_sim_fn(q_traj, q_dot_traj, q0_init, q0_goal)  # [batch_size]
+        
+        # Reshape waypoints
+        batch_size = waypoints_flat.size(0)
+        waypoints_reshaped = waypoints_flat.view(batch_size, self.num_waypoints, self.n_q)
+        
+        # Mean of joint^2 penalty (per sample: mean over waypoints and joints)
+        joint_squared_per_sample = (waypoints_reshaped ** 2).mean(dim=(1, 2))  # [batch_size]
+        joint_squared_penalty_batch = joint_squared_per_sample * joint_squared_weight  # [batch_size]
+        
+        # Joint change penalty (per sample: mean over waypoint pairs and joints)
+        if self.num_waypoints > 1:
+            joint_diff = waypoints_reshaped[:, 1:, :] - waypoints_reshaped[:, :-1, :]  # [batch_size, num_waypoints-1, n_q]
+            joint_change_squared_per_sample = (joint_diff ** 2).mean(dim=(1, 2))  # [batch_size]
+            joint_change_penalty_batch = joint_change_squared_per_sample * joint_change_weight  # [batch_size]
+        else:
+            joint_change_penalty_batch = torch.zeros(batch_size, device=waypoints_flat.device, dtype=waypoints_flat.dtype)
+        
+        # Maximum joint angle penalty (per sample: max over all waypoints and joints)
+        max_joint_angle_per_sample = waypoints_reshaped.abs().view(batch_size, -1).max(dim=1)[0]  # [batch_size]
+        max_joint_penalty_batch = max_joint_angle_per_sample * max_joint_weight  # [batch_size]
+        
+        # Total loss (per sample)
+        total_loss_batch = (physics_loss_batch + joint_squared_penalty_batch + 
+                           joint_change_penalty_batch + max_joint_penalty_batch)  # [batch_size]
+        
+        # Return mean or per-sample losses
+        if return_mean:
+            physics_loss = physics_loss_batch.mean()
+            joint_squared_penalty = joint_squared_penalty_batch.mean()
+            joint_change_penalty = joint_change_penalty_batch.mean()
+            max_joint_penalty = max_joint_penalty_batch.mean()
+            total_loss = total_loss_batch.mean()
+        else:
+            physics_loss = physics_loss_batch
+            joint_squared_penalty = joint_squared_penalty_batch
+            joint_change_penalty = joint_change_penalty_batch
+            max_joint_penalty = max_joint_penalty_batch
+            total_loss = total_loss_batch
+        
+        # Return loss dict for logging
+        loss_dict = {
+            'physics_loss': physics_loss,
+            'joint_squared_penalty': joint_squared_penalty,
+            'joint_change_penalty': joint_change_penalty,
+            'max_joint_penalty': max_joint_penalty,
+            'total_loss': total_loss
+        }
+        
+        return total_loss, loss_dict
 
 

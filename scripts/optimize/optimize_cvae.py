@@ -236,7 +236,7 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     axes[0].set_title(f"{title} - Joint Angles (Cubic Spline)")
     axes[0].set_ylabel("Rad")
     axes[0].grid(True)
-    axes[0].legend(loc="right", fontsize="small")
+    axes[0].legend(loc="upper left", fontsize=8)
 
     # 2) Joint Velocities
     for i in range(q_dot_traj.shape[1]):
@@ -256,7 +256,7 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     axes[2].set_xlabel("Time [s]")
     axes[2].set_ylabel("Angle [deg]")
     axes[2].grid(True)
-    axes[2].legend(loc="right", fontsize="small")
+    axes[2].legend(loc="upper left", fontsize=8)
 
     plt.tight_layout()
     plt.savefig(save_path)
@@ -315,9 +315,11 @@ def main():
     COND_DIM = 8
     NUM_WAYPOINTS = 3
     OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
-    LATENT_DIM = 8
+    LATENT_DIM = 3
     TOTAL_TIME = 10.0  # 10초 trajectory
-    MAX_JOINT_WEIGHT = 0.01  # Weight for maximum joint angle regularization (same as training)
+    JOINT_SQUARED_WEIGHT = 0.01  # Weight for mean of joint^2 regularization
+    JOINT_CHANGE_WEIGHT = 0.01  # Weight for joint change penalty between consecutive waypoints
+    MAX_JOINT_WEIGHT = 0.1  # Weight for maximum joint angle penalty
 
     # PhysicsLayer (GPU only)
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
@@ -347,7 +349,7 @@ def main():
     # CVAE inference parameters
     num_samples = args.num_samples  # Number of samples to generate and evaluate
     
-    cvae_weights_path = os.path.join(ROOT_DIR, "outputs/weights/cvae_debug/v4.pth")
+    cvae_weights_path = os.path.join(ROOT_DIR, "outputs/weights/cvae_debug/v5_joint_change.pth")
     cvae_model = load_model(
         CVAE,
         cvae_weights_path,
@@ -358,25 +360,25 @@ def main():
         joint_limits=robot['joint_limits']
     )
 
-    # Create batch simulator function using vmap
-    batch_sim_fn = vmap(physics.simulate_single, in_dims=(0, 0, 0, 0))
-
     with torch.no_grad():
         z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
         cond_batch = condition.repeat(num_samples, 1)
         candidates = cvae_model.decode(cond_batch, z)
         
-        q_traj, q_dot_traj = physics.generate_trajectory(candidates)
+        # Calculate total loss for all candidates using PhysicsLayer (batch processing)
+        q0_start_batch = q0_start.repeat(num_samples, 1)
+        q0_goal_batch = q0_goal.repeat(num_samples, 1)
         
-        sim_out = batch_sim_fn(
-            q_traj,
-            q_dot_traj,
-            q0_start.repeat(num_samples, 1),
-            q0_goal.repeat(num_samples, 1),
+        total_loss, _ = physics.calculate_total_loss(
+            candidates, q0_start_batch, q0_goal_batch,
+            joint_squared_weight=JOINT_SQUARED_WEIGHT,
+            joint_change_weight=JOINT_CHANGE_WEIGHT,
+            max_joint_weight=MAX_JOINT_WEIGHT,
+            return_mean=False  # Return per-sample losses
         )
         
-        losses = sim_out[0] if isinstance(sim_out, (tuple, list)) else sim_out
-        losses = torch.where(torch.isfinite(losses), losses, torch.full_like(losses, float("inf")))
+        # total_loss is now [num_samples] tensor
+        losses = torch.where(torch.isfinite(total_loss), total_loss, torch.full_like(total_loss, float("inf")))
         
         best_idx = torch.argmin(losses)
         best_waypoints = candidates[best_idx:best_idx + 1].clone()
@@ -396,15 +398,22 @@ def main():
         
         # Evaluate final loss without optimization (GPU)
         with torch.no_grad():
+            total_loss, loss_dict = physics.calculate_total_loss(
+                waypoints_param, q0_start, q0_goal,
+                joint_squared_weight=JOINT_SQUARED_WEIGHT,
+                joint_change_weight=JOINT_CHANGE_WEIGHT,
+                max_joint_weight=MAX_JOINT_WEIGHT
+            )
+            physics_loss = loss_dict['physics_loss'].item()
+            joint_squared_penalty = loss_dict['joint_squared_penalty'].item()
+            joint_change_penalty = loss_dict['joint_change_penalty'].item()
+            max_joint_penalty = loss_dict['max_joint_penalty'].item()
+            total_loss_val = loss_dict['total_loss'].item()
+            
+            # Get final quaternion for angle error calculation
             q_traj, q_dot_traj = physics.generate_trajectory(waypoints_param)
             sim_out = physics.simulate_single(q_traj[0], q_dot_traj[0], q0_start[0], q0_goal[0])
-            physics_loss = sim_out[0].item()
-            q_final_from_sim = sim_out[1]  # Final quaternion from simulate_single (used for loss calculation)
-            
-            waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
-            max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0].item()
-            max_joint_penalty = max_joint_angle * MAX_JOINT_WEIGHT
-            total_loss = physics_loss + max_joint_penalty
+            q_final_from_sim = sim_out[1]  # Final quaternion from simulate_single
             
             # Calculate actual quaternion error from simulate_single's q_final
             q1 = q_final_from_sim
@@ -414,7 +423,7 @@ def main():
         
         print(f"\nInference Finished (CVAE sampling only). Time: {inference_end - inference_start:.4f}s")
         print(f"Physics Loss (GPU): {physics_loss:.8f}")
-        print(f"Total Loss: {total_loss:.2e} (physics: {physics_loss:.2e}, joint_penalty: {max_joint_penalty:.2e})")
+        print(f"Total Loss: {total_loss_val:.2e} (physics: {physics_loss:.2e}, joint_sq: {joint_squared_penalty:.2e}, joint_change: {joint_change_penalty:.2e}, max_joint: {max_joint_penalty:.2e})")
         print(f"Quat angle error (from simulate_single q_final): {quat_angle_err_from_sim.item():.2e}°")
         print(f"Final waypoints (on GPU): {waypoints_param}")
         
@@ -444,15 +453,12 @@ def main():
 
         def closure():
             optimizer.zero_grad()
-            physics_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
-            
-            # Maximum joint angle penalty (same as training)
-            waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
-            max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0]  # [1]
-            max_joint_penalty = max_joint_angle.mean()  # Scalar
-            
-            # Combined loss (same as training)
-            loss = physics_loss + MAX_JOINT_WEIGHT * max_joint_penalty
+            loss, loss_dict = physics.calculate_total_loss(
+                waypoints_param, q0_start, q0_goal,
+                joint_squared_weight=JOINT_SQUARED_WEIGHT,
+                joint_change_weight=JOINT_CHANGE_WEIGHT,
+                max_joint_weight=MAX_JOINT_WEIGHT
+            )
             
             loss.backward()
             loss_value = loss.item()
@@ -460,7 +466,11 @@ def main():
             iteration_count[0] += 1
 
             if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
-                print(f"[GPU] Iter [{iteration_count[0]}] Loss: {loss_value:.6f} (physics: {physics_loss.item():.6f}, joint_penalty: {max_joint_penalty.item():.6f})")
+                physics_loss_val = loss_dict['physics_loss'].item()
+                joint_sq_val = loss_dict['joint_squared_penalty'].item()
+                joint_change_val = loss_dict['joint_change_penalty'].item()
+                max_joint_val = loss_dict['max_joint_penalty'].item()
+                print(f"[GPU] Iter [{iteration_count[0]}] Loss: {loss_value:.6f} (physics: {physics_loss_val:.6f}, joint_sq: {joint_sq_val:.6f}, joint_change: {joint_change_val:.6f}, max_joint: {max_joint_val:.6f})")
 
             return loss
 
@@ -470,12 +480,17 @@ def main():
 
         # Results (GPU)
         with torch.no_grad():
-            physics_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal).item()
-            
-            waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
-            max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0].item()
-            max_joint_penalty = max_joint_angle * MAX_JOINT_WEIGHT
-            total_loss = physics_loss + max_joint_penalty
+            total_loss, loss_dict = physics.calculate_total_loss(
+                waypoints_param, q0_start, q0_goal,
+                joint_squared_weight=JOINT_SQUARED_WEIGHT,
+                joint_change_weight=JOINT_CHANGE_WEIGHT,
+                max_joint_weight=MAX_JOINT_WEIGHT
+            )
+            physics_loss = loss_dict['physics_loss'].item()
+            joint_squared_penalty = loss_dict['joint_squared_penalty'].item()
+            joint_change_penalty = loss_dict['joint_change_penalty'].item()
+            max_joint_penalty = loss_dict['max_joint_penalty'].item()
+            total_loss_val = loss_dict['total_loss'].item()
 
             # Calculate actual quaternion error for display
             q_traj_temp, q_dot_traj_temp = physics.generate_trajectory(waypoints_param)
@@ -489,7 +504,7 @@ def main():
 
         print(f"\nInference Finished (CVAE warm start). Time: {inference_end - inference_start:.4f}s")
         print(f"Optimization Finished (LBFGS, GPU). Time: {opt_end - opt_start:.4f}s")
-        print(f"Total Loss: {total_loss:.2e} (physics: {physics_loss:.2e}, joint_penalty: {max_joint_penalty:.2e})")
+        print(f"Total Loss: {total_loss_val:.2e} (physics: {physics_loss:.2e}, joint_sq: {joint_squared_penalty:.2e}, joint_change: {joint_change_penalty:.2e}, max_joint: {max_joint_penalty:.2e})")
         print(f"Angle Error: {final_deg.item():.2e}°")
         print(f"Iterations: {len(loss_history)}")
         print(f"Final waypoints (on GPU): {waypoints_param}")
@@ -551,8 +566,9 @@ def main():
 
         # Plot title depends on whether optimization was performed
         # Use quat_angle_err_sim for angle display (available in both cases)
+        # Get physics_loss for plot title from already computed loss_dict
         plot_title = f"CVAE{'+LBFGS' if optimize_flag else ''} (Err: {physics_loss:.6f}, Angle: {quat_angle_err_sim.item():.2e}°)"
-        plot_filename = "cvae_lbfgs_traj_gpu_opt.png" if optimize_flag else "cvae_sample_traj.png"
+        plot_filename = "cvae_lbfgs_traj_v5.png" if optimize_flag else "cvae_sample_traj_v5.png"
         plot_trajectory(
             q_traj_single,
             q_dot_traj_single,
