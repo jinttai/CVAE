@@ -431,125 +431,116 @@ def main():
         opt_end = inference_end
     else:
         # =================================================================
-        # 2. LBFGS Refinement (GPU) - Optimize ALL samples and pick best
+        # 2. LBFGS Refinement (GPU) - Batch optimize ALL samples together
+        #    (one batched LBFGS, losses reduced by sum)
         # =================================================================
-        print(f"\n--- LBFGS Refinement on {device} (optimizing all {num_samples} samples) ---")
+        print(f"\n--- LBFGS Refinement on {device} (batched over {num_samples} samples) ---")
+
+        # Start from all CVAE candidates as initial waypoints
+        waypoints_param = candidates.clone().detach()
+        waypoints_param.requires_grad = True
+
+        # Batched start / goal (same start/goal for every sample)
+        q0_start_batch = q0_start.repeat(num_samples, 1)
+        q0_goal_batch = q0_goal.repeat(num_samples, 1)
+
+        optimizer = optim.LBFGS(
+            [waypoints_param],
+            lr=1e-3,
+            max_iter=20,
+            line_search_fn='strong_wolfe'
+        )
+
+        iteration_count = [0]
+
+        def closure():
+            optimizer.zero_grad()
+            # Per-sample losses: shape [num_samples]
+            loss_vec, _ = physics.calculate_total_loss(
+                waypoints_param, q0_start_batch, q0_goal_batch,
+                joint_squared_weight=JOINT_SQUARED_WEIGHT,
+                joint_change_weight=JOINT_CHANGE_WEIGHT,
+                max_joint_weight=MAX_JOINT_WEIGHT,
+                return_mean=False
+            )
+
+            # Sum over batch → scalar for LBFGS (each sample still has its own gradient)
+            loss = loss_vec.sum()
+            loss.backward()
+
+            iteration_count[0] += 1
+            if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
+                with torch.no_grad():
+                    finite_loss = loss_vec[torch.isfinite(loss_vec)]
+                    if finite_loss.numel() > 0:
+                        print(
+                            f"[GPU][Batched] Iter [{iteration_count[0]}] "
+                            f"mean loss: {finite_loss.mean().item():.6f}, "
+                            f"min loss: {finite_loss.min().item():.6f}, "
+                            f"max loss: {finite_loss.max().item():.6f}"
+                        )
+                    else:
+                        print(f"[GPU][Batched] Iter [{iteration_count[0]}] all losses are non-finite")
+
+            return loss
 
         opt_start = time.time()
-
-        best_total_loss_val = float("inf")
-        best_waypoints_param = None
-        best_physics_loss = None
-        best_joint_squared_penalty = None
-        best_joint_change_penalty = None
-        best_max_joint_penalty = None
-        best_final_deg = None
-        total_iterations = 0
-
-        for idx in range(num_samples):
-            print(f"\n[Sample {idx+1}/{num_samples}] Starting LBFGS refinement...")
-
-            waypoints_param_i = candidates[idx : idx + 1].clone().detach()
-            waypoints_param_i.requires_grad = True
-
-            optimizer = optim.LBFGS(
-                [waypoints_param_i],
-                lr=1e-3,
-                max_iter=20,
-                line_search_fn='strong_wolfe'
-            )
-
-            iteration_count = [0]
-
-            def closure():
-                optimizer.zero_grad()
-                loss, loss_dict = physics.calculate_total_loss(
-                    waypoints_param_i, q0_start, q0_goal,
-                    joint_squared_weight=JOINT_SQUARED_WEIGHT,
-                    joint_change_weight=JOINT_CHANGE_WEIGHT,
-                    max_joint_weight=MAX_JOINT_WEIGHT
-                )
-
-                loss.backward()
-                loss_value = loss.item()
-                iteration_count[0] += 1
-
-                if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
-                    physics_loss_val = loss_dict['physics_loss'].item()
-                    joint_sq_val = loss_dict['joint_squared_penalty'].item()
-                    joint_change_val = loss_dict['joint_change_penalty'].item()
-                    max_joint_val = loss_dict['max_joint_penalty'].item()
-                    print(
-                        f"[GPU][Sample {idx+1}] Iter [{iteration_count[0]}] "
-                        f"Loss: {loss_value:.6f} "
-                        f"(physics: {physics_loss_val:.6f}, joint_sq: {joint_sq_val:.6f}, "
-                        f"joint_change: {joint_change_val:.6f}, max_joint: {max_joint_val:.6f})"
-                    )
-
-                return loss
-
-            optimizer.step(closure)
-            total_iterations += iteration_count[0]
-
-            # Evaluate this sample's final result
-            with torch.no_grad():
-                total_loss_i, loss_dict_i = physics.calculate_total_loss(
-                    waypoints_param_i, q0_start, q0_goal,
-                    joint_squared_weight=JOINT_SQUARED_WEIGHT,
-                    joint_change_weight=JOINT_CHANGE_WEIGHT,
-                    max_joint_weight=MAX_JOINT_WEIGHT
-                )
-
-                total_loss_val_i = loss_dict_i['total_loss'].item()
-                physics_loss_i = loss_dict_i['physics_loss'].item()
-                joint_squared_penalty_i = loss_dict_i['joint_squared_penalty'].item()
-                joint_change_penalty_i = loss_dict_i['joint_change_penalty'].item()
-                max_joint_penalty_i = loss_dict_i['max_joint_penalty'].item()
-
-                # Quaternion angle error for this sample
-                q_traj_temp, q_dot_traj_temp = physics.generate_trajectory(waypoints_param_i)
-                sim_out_temp = physics.simulate_single(q_traj_temp[0], q_dot_traj_temp[0], q0_start[0], q0_goal[0])
-                q_final_temp = sim_out_temp[1]
-                q1 = q_final_temp
-                q2 = q0_goal[0]
-                dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
-                angle_rad = 2.0 * torch.acos(dot)
-                final_deg_i = angle_rad * 180.0 / math.pi
-
-            print(
-                f"[Sample {idx+1}] Finished. "
-                f"Total Loss: {total_loss_val_i:.2e} "
-                f"(physics: {physics_loss_i:.2e}, joint_sq: {joint_squared_penalty_i:.2e}, "
-                f"joint_change: {joint_change_penalty_i:.2e}, max_joint: {max_joint_penalty_i:.2e}), "
-                f"Angle Error: {final_deg_i.item():.2e}°"
-            )
-
-            # Keep best among all optimized samples
-            if total_loss_val_i < best_total_loss_val:
-                best_total_loss_val = total_loss_val_i
-                best_waypoints_param = waypoints_param_i.detach().clone()
-                best_physics_loss = physics_loss_i
-                best_joint_squared_penalty = joint_squared_penalty_i
-                best_joint_change_penalty = joint_change_penalty_i
-                best_max_joint_penalty = max_joint_penalty_i
-                best_final_deg = final_deg_i.detach().clone()
-
+        optimizer.step(closure)
         opt_end = time.time()
 
-        # Use the best optimized sample going forward
+        # After batched optimization, pick the best sample
+        with torch.no_grad():
+            total_loss_vec, _ = physics.calculate_total_loss(
+                waypoints_param, q0_start_batch, q0_goal_batch,
+                joint_squared_weight=JOINT_SQUARED_WEIGHT,
+                joint_change_weight=JOINT_CHANGE_WEIGHT,
+                max_joint_weight=MAX_JOINT_WEIGHT,
+                return_mean=False
+            )
+
+            # Handle possible inf/nan
+            safe_losses = torch.where(
+                torch.isfinite(total_loss_vec),
+                total_loss_vec,
+                torch.full_like(total_loss_vec, float("inf"))
+            )
+            best_idx = torch.argmin(safe_losses)
+            best_waypoints_param = waypoints_param[best_idx : best_idx + 1].clone()
+
+            # Re-evaluate best sample with full scalar loss dict (no batching)
+            total_loss, loss_dict = physics.calculate_total_loss(
+                best_waypoints_param, q0_start, q0_goal,
+                joint_squared_weight=JOINT_SQUARED_WEIGHT,
+                joint_change_weight=JOINT_CHANGE_WEIGHT,
+                max_joint_weight=MAX_JOINT_WEIGHT
+            )
+            physics_loss = loss_dict['physics_loss'].item()
+            joint_squared_penalty = loss_dict['joint_squared_penalty'].item()
+            joint_change_penalty = loss_dict['joint_change_penalty'].item()
+            max_joint_penalty = loss_dict['max_joint_penalty'].item()
+            total_loss_val = loss_dict['total_loss'].item()
+
+            # Quaternion angle error for best sample
+            q_traj_temp, q_dot_traj_temp = physics.generate_trajectory(best_waypoints_param)
+            sim_out_temp = physics.simulate_single(q_traj_temp[0], q_dot_traj_temp[0], q0_start[0], q0_goal[0])
+            q_final_temp = sim_out_temp[1]
+            q1 = q_final_temp
+            q2 = q0_goal[0]
+            dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
+            angle_rad = 2.0 * torch.acos(dot)
+            final_deg = angle_rad * 180.0 / math.pi
+
+        # Use best optimized sample going forward
         waypoints_param = best_waypoints_param
-        physics_loss = best_physics_loss
-        joint_squared_penalty = best_joint_squared_penalty
-        joint_change_penalty = best_joint_change_penalty
-        max_joint_penalty = best_max_joint_penalty
-        total_loss_val = best_total_loss_val
-        final_deg = best_final_deg
 
         print(f"\nInference Finished (CVAE warm start). Time: {inference_end - inference_start:.4f}s")
-        print(f"Optimization Finished (LBFGS, GPU, all samples). Time: {opt_end - opt_start:.4f}s")
-        print(f"Best Total Loss: {total_loss_val:.2e} (physics: {physics_loss:.2e}, joint_sq: {joint_squared_penalty:.2e}, joint_change: {joint_change_penalty:.2e}, max_joint: {max_joint_penalty:.2e})")
+        print(f"Optimization Finished (LBFGS, GPU, batched). Time: {opt_end - opt_start:.4f}s")
+        print(
+            f"Best Total Loss: {total_loss_val:.2e} "
+            f"(physics: {physics_loss:.2e}, joint_sq: {joint_squared_penalty:.2e}, "
+            f"joint_change: {joint_change_penalty:.2e}, max_joint: {max_joint_penalty:.2e})"
+        )
         print(f"Best Angle Error: {final_deg.item():.2e}°")
-        print(f"Total LBFGS iterations over all samples: {total_iterations}")
         print(f"Final best waypoints (on GPU): {waypoints_param}")
 
     # 3. 최종 궤적 생성 및 저장 (GPU)
