@@ -1,12 +1,13 @@
 """
 DDP/iLQR Solver
-PyTorch implementation of Differential Dynamic Programming / Iterative LQR.
+JAX implementation of Differential Dynamic Programming / Iterative LQR.
 """
 
-import torch
-from torch.func import jacrev, hessian
-import ddp.dynamics_torch as dynamics
-import ddp.cost as cost
+import jax
+import jax.numpy as jnp
+from jax import grad, jacrev, hessian
+import ddp.dynamics_jax as dynamics
+import ddp.cost_jax as cost
 
 
 def compute_dynamics_jacobians(dynamics_model, state, control, dt):
@@ -23,15 +24,12 @@ def compute_dynamics_jacobians(dynamics_model, state, control, dt):
         f_x: [10, 10] Jacobian w.r.t. state
         f_u: [10, 6] Jacobian w.r.t. control
     """
-    state = state.clone().requires_grad_(True)
-    control = control.clone().requires_grad_(True)
-    
     def dynamics_fn(s, u):
         return dynamics_model.step(s, u, dt)
     
-    # Compute Jacobians using torch.func
-    f_x = jacrev(lambda s: dynamics_fn(s, control), has_aux=False)(state)
-    f_u = jacrev(lambda u: dynamics_fn(state, u), has_aux=False)(control)
+    # Compute Jacobians using JAX
+    f_x = jacrev(lambda s: dynamics_fn(s, control))(state)
+    f_u = jacrev(lambda u: dynamics_fn(state, u))(control)
     
     return f_x, f_u
 
@@ -51,87 +49,45 @@ def compute_dynamics_hessians(dynamics_model, state, control, dt):
         f_uu: [10, 6, 6] Hessian tensor w.r.t. control (f_uu[i] is Hessian of f[i])
         f_ux: [10, 6, 10] Mixed Hessian tensor (f_ux[i] is mixed Hessian of f[i])
     """
-    # Ensure consistent dtype - use state's dtype as reference
-    dtype = state.dtype
-    device = state.device
-    
-    # Convert both to same dtype if needed (preserve requires_grad)
-    state = state.clone().to(dtype=dtype).requires_grad_(True)
-    control = control.clone().to(dtype=dtype).requires_grad_(True)
-    
     def dynamics_fn(s, u):
         return dynamics_model.step(s, u, dt)
     
     n_x = state.shape[0]  # 10
     n_u = control.shape[0]  # 6
     
-    # Initialize Hessian tensors with correct dtype
-    f_xx = torch.zeros(n_x, n_x, n_x, device=device, dtype=dtype)
-    f_uu = torch.zeros(n_x, n_u, n_u, device=device, dtype=dtype)
-    f_ux = torch.zeros(n_x, n_u, n_x, device=device, dtype=dtype)
+    # Initialize Hessian tensors
+    f_xx = jnp.zeros((n_x, n_x, n_x))
+    f_uu = jnp.zeros((n_x, n_u, n_u))
+    f_ux = jnp.zeros((n_x, n_u, n_x))
     
-    # Compute Hessian manually using autograd (like compute_cost_derivatives)
-    # This gives us better control over dtypes
+    # Compute Hessian for each output dimension
     for i in range(n_x):
         # f_xx[i]: Hessian of f[i] w.r.t. state
-        # First compute gradient
-        s_var = state.clone().requires_grad_(True)
-        u_fixed = control.detach().clone()
-        fi_val = dynamics_fn(s_var, u_fixed)[i]
+        def fi_x(s):
+            return dynamics_fn(s, control)[i]
         
-        # Compute gradient w.r.t. state
-        fi_x_grad = torch.autograd.grad(
-            fi_val, s_var, create_graph=True, retain_graph=True
-        )[0]
-        
-        # Compute Hessian: second derivative
-        f_xx_i = torch.zeros(n_x, n_x, device=device, dtype=dtype)
-        for j in range(n_x):
-            grad_j = torch.autograd.grad(
-                fi_x_grad[j], s_var, retain_graph=(j < n_x - 1), create_graph=False
-            )[0]
-            f_xx_i[j] = grad_j
-        f_xx[i] = f_xx_i
+        # Compute Hessian using JAX
+        f_xx_i = hessian(fi_x)(state)
+        f_xx = f_xx.at[i].set(f_xx_i)
         
         # f_uu[i]: Hessian of f[i] w.r.t. control
-        s_fixed = state.detach().clone()
-        u_var = control.clone().requires_grad_(True)
-        fi_val = dynamics_fn(s_fixed, u_var)[i]
+        def fi_u(u):
+            return dynamics_fn(state, u)[i]
         
-        # Compute gradient w.r.t. control
-        fi_u_grad = torch.autograd.grad(
-            fi_val, u_var, create_graph=True, retain_graph=True
-        )[0]
-        
-        # Compute Hessian: second derivative
-        f_uu_i = torch.zeros(n_u, n_u, device=device, dtype=dtype)
-        for j in range(n_u):
-            grad_j = torch.autograd.grad(
-                fi_u_grad[j], u_var, retain_graph=(j < n_u - 1), create_graph=False
-            )[0]
-            f_uu_i[j] = grad_j
-        f_uu[i] = f_uu_i
+        f_uu_i = hessian(fi_u)(control)
+        f_uu = f_uu.at[i].set(f_uu_i)
         
         # f_ux[i]: Mixed Hessian of f[i] w.r.t. control and state
         # This is computed as: ∂²f[i]/∂u∂x = ∂(∂f[i]/∂u)/∂x
         # First compute ∂f[i]/∂u, then take its Jacobian w.r.t. x
-        s_var = state.clone().requires_grad_(True)
-        u_var = control.clone().requires_grad_(True)
-        fi_val = dynamics_fn(s_var, u_var)[i]
+        def fi_u_grad(s):
+            # Compute gradient w.r.t. control
+            def fi_val(u):
+                return dynamics_fn(s, u)[i]
+            return grad(fi_val)(control)
         
-        # Compute gradient w.r.t. control
-        fi_u_grad = torch.autograd.grad(
-            fi_val, u_var, create_graph=True, retain_graph=True
-        )[0]
-        
-        # Compute Jacobian of fi_u_grad w.r.t. state
-        f_ux_i = torch.zeros(n_u, n_x, device=device, dtype=dtype)
-        for j in range(n_u):
-            grad_j = torch.autograd.grad(
-                fi_u_grad[j], s_var, retain_graph=(j < n_u - 1), create_graph=False
-            )[0]
-            f_ux_i[j] = grad_j
-        f_ux[i] = f_ux_i
+        f_ux_i = jacrev(fi_u_grad)(state)
+        f_ux = f_ux.at[i].set(f_ux_i)
     
     return f_xx, f_uu, f_ux
 
@@ -153,77 +109,30 @@ def compute_cost_derivatives(running_cost_fn, terminal_cost_fn, state, control, 
         L_xx: [10, 10] Hessian w.r.t. state
         L_uu: [6, 6] Hessian w.r.t. control (zero if terminal)
     """
-    state = state.clone().requires_grad_(True)
-    
     if is_terminal:
         # Terminal cost
         def cost_fn_terminal(s):
             return terminal_cost_fn(s)
         
-        # Gradient
-        L_x = torch.autograd.grad(
-            cost_fn_terminal(state),
-            state,
-            create_graph=True,
-            retain_graph=True
-        )[0]
+        # Gradient and Hessian
+        L_x = grad(cost_fn_terminal)(state)
+        L_xx = hessian(cost_fn_terminal)(state)
         
-        # Hessian
-        L_xx = torch.zeros(10, 10, device=state.device)
-        for i in range(10):
-            grad_i = torch.autograd.grad(
-                L_x[i],
-                state,
-                retain_graph=(i < 9),
-                create_graph=False
-            )[0]
-            L_xx[i] = grad_i
-        
-        L_u = torch.zeros(6, device=state.device)
-        L_uu = torch.zeros(6, 6, device=state.device)
+        L_u = jnp.zeros(6)
+        L_uu = jnp.zeros((6, 6))
         
     else:
         # Running cost
-        control = control.clone().requires_grad_(True)
-        
         def cost_fn_running(s, u):
             return running_cost_fn(s, u)
         
         # Gradient
-        L_x = torch.autograd.grad(
-            cost_fn_running(state, control),
-            state,
-            create_graph=True,
-            retain_graph=True
-        )[0]
+        L_x = grad(lambda s: cost_fn_running(s, control))(state)
+        L_u = grad(lambda u: cost_fn_running(state, u))(control)
         
-        L_u = torch.autograd.grad(
-            cost_fn_running(state, control),
-            control,
-            create_graph=True,
-            retain_graph=True
-        )[0]
-        
-        # Hessian (approximate using second-order derivatives)
-        L_xx = torch.zeros(10, 10, device=state.device)
-        for i in range(10):
-            grad_i = torch.autograd.grad(
-                L_x[i],
-                state,
-                retain_graph=(i < 9),
-                create_graph=False
-            )[0]
-            L_xx[i] = grad_i
-        
-        L_uu = torch.zeros(6, 6, device=state.device)
-        for i in range(6):
-            grad_i = torch.autograd.grad(
-                L_u[i],
-                control,
-                retain_graph=(i < 5),
-                create_graph=False
-            )[0]
-            L_uu[i] = grad_i
+        # Hessian
+        L_xx = hessian(lambda s: cost_fn_running(s, control))(state)
+        L_uu = hessian(lambda u: cost_fn_running(state, u))(control)
     
     return L_x, L_u, L_xx, L_uu
 
@@ -236,7 +145,7 @@ class DDP:
     def __init__(self, dynamics_model, running_cost, terminal_cost, 
                  max_iter=50, tol=1e-4, reg_init=1.0, reg_min=1e-6, reg_max=1e6,
                  reg_factor=10.0, line_search_alpha=0.5, line_search_beta=0.8, 
-                 use_full_ddp=True, device='cpu'):
+                 use_full_ddp=True):
         """
         Args:
             dynamics_model: SpaceRobotDynamics instance
@@ -265,8 +174,6 @@ class DDP:
         self.line_search_alpha = line_search_alpha
         self.line_search_beta = line_search_beta
         self.use_full_ddp = use_full_ddp
-        
-        self.device = device if device else dynamics_model.device
     
     def backward_pass(self, states, controls, dt, reg, use_full_ddp=True):
         """
@@ -292,8 +199,8 @@ class DDP:
         V_x, V_xx = self._compute_terminal_value_derivatives(states[-1])
         
         # Storage for gains
-        k = torch.zeros(T, n_u, device=self.device)
-        K = torch.zeros(T, n_u, n_x, device=self.device)
+        k = jnp.zeros((T, n_u))
+        K = jnp.zeros((T, n_u, n_x))
         
         # Backward recursion
         for t in range(T - 1, -1, -1):
@@ -321,10 +228,9 @@ class DDP:
                 f_xx, f_uu, f_ux = compute_dynamics_hessians(self.dynamics, x, u, dt)
                 
                 # Add curvature terms: Σᵢ V_x[i] * f_xx[i], etc.
-                # f_xx[i] is [n_x, n_x], so we contract V_x with f_xx
-                curvature_xx = torch.zeros(n_x, n_x, device=self.device)
-                curvature_uu = torch.zeros(n_u, n_u, device=self.device)
-                curvature_ux = torch.zeros(n_u, n_x, device=self.device)
+                curvature_xx = jnp.zeros((n_x, n_x))
+                curvature_uu = jnp.zeros((n_u, n_u))
+                curvature_ux = jnp.zeros((n_u, n_x))
                 
                 for i in range(n_x):
                     curvature_xx += V_x[i] * f_xx[i]
@@ -336,17 +242,17 @@ class DDP:
                 Q_ux = Q_ux + curvature_ux
             
             # Regularization for numerical stability
-            Q_uu_reg = Q_uu + reg * torch.eye(n_u, device=self.device)
+            Q_uu_reg = Q_uu + reg * jnp.eye(n_u)
             
             # Solve for gains
             try:
-                Q_uu_inv = torch.linalg.solve(Q_uu_reg, torch.eye(n_u, device=self.device))
+                Q_uu_inv = jnp.linalg.solve(Q_uu_reg, jnp.eye(n_u))
             except:
                 # Fallback to pseudo-inverse if singular
-                Q_uu_inv = torch.linalg.pinv(Q_uu_reg)
+                Q_uu_inv = jnp.linalg.pinv(Q_uu_reg)
             
-            k[t] = -Q_uu_inv @ Q_u
-            K[t] = -Q_uu_inv @ Q_ux
+            k = k.at[t].set(-Q_uu_inv @ Q_u)
+            K = K.at[t].set(-Q_uu_inv @ Q_ux)
             
             # Update value function derivatives
             V_x = Q_x + K[t].T @ Q_uu @ k[t] + K[t].T @ Q_u + Q_ux.T @ k[t]
@@ -373,25 +279,49 @@ class DDP:
             total_cost: scalar total cost
         """
         T = controls.shape[0]
-        new_states = torch.zeros(T + 1, 10, device=self.device)
-        new_controls = torch.zeros(T, 6, device=self.device)
-        new_states[0] = initial_state
+        new_states = jnp.zeros((T + 1, 10))
+        new_controls = jnp.zeros((T, 6))
+        new_states = new_states.at[0].set(initial_state)
         
         total_cost = 0.0
         
-        for t in range(T):
+        def scan_step(carry, t):
+            state_t, cost_accum = carry
             # Compute control update
-            dx = new_states[t] - nominal_states[t]  # Deviation from nominal
+            dx = state_t - nominal_states[t]  # Deviation from nominal
             du = alpha * k[t] + K[t] @ dx
             
-            # Apply control
-            new_controls[t] = controls[t] + du
+            # Apply control (before safety measures)
+            u_new = controls[t] + du
+
+            # --------------------------------------------------------------
+            # Numerical safety: sanitize and clamp controls to avoid blow-up
+            # --------------------------------------------------------------
+            # Replace NaNs / Infs with finite values
+            u_new = jnp.nan_to_num(u_new, nan=0.0, posinf=1e3, neginf=-1e3)
+            # Hard bound on joint velocities (rad/s)
+            u_max = 1.0
+            u_new = jnp.clip(u_new, -u_max, u_max)
             
             # Step dynamics
-            new_states[t + 1] = self.dynamics.step(new_states[t], new_controls[t], dt)
+            state_next = self.dynamics.step(state_t, u_new, dt)
+            # Sanitize state to prevent NaN propagation
+            state_next = jnp.nan_to_num(state_next, nan=0.0, posinf=1e3, neginf=-1e3)
             
             # Accumulate cost
-            total_cost = total_cost + self.running_cost(new_states[t], new_controls[t])
+            cost_new = self.running_cost(state_t, u_new)
+            cost_accum = cost_accum + cost_new
+            
+            return (state_next, cost_accum), (state_next, u_new)
+        
+        # Use scan for efficient computation
+        (final_state, total_cost), (states_array, controls_array) = jax.lax.scan(
+            scan_step, (initial_state, 0.0), jnp.arange(T)
+        )
+        
+        # Stack initial state
+        new_states = jnp.vstack([initial_state, states_array])
+        new_controls = controls_array
         
         # Terminal cost
         total_cost = total_cost + self.terminal_cost(new_states[-1])
@@ -402,19 +332,19 @@ class DDP:
         """Compute terminal value function derivatives."""
         L_x, _, L_xx, _ = compute_cost_derivatives(
             self.running_cost, self.terminal_cost, terminal_state, 
-            torch.zeros(6, device=self.device), is_terminal=True
+            jnp.zeros(6), is_terminal=True
         )
         return L_x, L_xx
     
     def solve(self, initial_state, initial_controls, dt):
         """
         Solve DDP optimization problem.
-        
+
         Args:
             initial_state: [10] initial state
             initial_controls: [T, 6] initial control sequence
             dt: time step
-        
+
         Returns:
             states: [T+1, 10] optimal state trajectory
             controls: [T, 6] optimal control sequence
@@ -422,71 +352,74 @@ class DDP:
         """
         # Initial rollout
         states = self.dynamics.rollout(initial_state, initial_controls, dt)
-        controls = initial_controls.clone()
-        
+        controls = initial_controls
+
         # Compute initial cost
         initial_cost = 0.0
         for t in range(controls.shape[0]):
             initial_cost = initial_cost + self.running_cost(states[t], controls[t])
         initial_cost = initial_cost + self.terminal_cost(states[-1])
-        
-        cost_history = [initial_cost.item()]
-        
+
+        cost_history = [float(initial_cost)]
+
         reg = self.reg_init
-        
-        print(f"Iteration 0: Initial cost = {initial_cost.item():.6f}, reg = {reg:.6e}")
-        
-        # Main iteration loop
+
+        print(f"Iteration 0: Initial cost = {initial_cost:.6f}, reg = {reg:.6e}")
+
+        # Main iteration loop (kept in Python for clarity and to avoid JAX
+        # host/device value conversion issues from Python floats and lists)
         for iteration in range(self.max_iter):
             # Backward pass
             k, K = self.backward_pass(states, controls, dt, reg, self.use_full_ddp)
-            
+
             # Forward pass with line search
             alpha = 1.0
             best_cost = float('inf')
             best_states = None
             best_controls = None
             best_alpha = 0.0
-            
+
             for ls_iter in range(10):  # Max line search iterations
                 new_states, new_controls, new_cost = self.forward_pass(
                     initial_state, states, controls, k, K, dt, alpha
                 )
-                
-                if new_cost.item() < best_cost:
-                    best_cost = new_cost.item()
+
+                new_cost_val = float(new_cost)
+                if new_cost_val < best_cost:
+                    best_cost = new_cost_val
                     best_states = new_states
                     best_controls = new_controls
                     best_alpha = alpha
-                    
+
                     # Check improvement
                     improvement = cost_history[-1] - best_cost
-                    if improvement >= self.line_search_alpha * alpha * torch.sum(k ** 2).item():
+                    k_norm_sq = float(jnp.sum(k ** 2))
+                    if improvement >= self.line_search_alpha * alpha * k_norm_sq:
                         break
-                
+
                 alpha *= self.line_search_beta
-            
+
             # Update trajectory
             if best_states is not None:
                 prev_cost = cost_history[-1]
                 cost_reduction = prev_cost - best_cost
-                
+
                 states = best_states
                 controls = best_controls
                 cost_history.append(best_cost)
-                
+
                 # Print iteration info
                 print(f"Iteration {iteration + 1}: Cost = {best_cost:.6f}, "
                       f"Reduction = {cost_reduction:.6e}, "
                       f"Alpha = {best_alpha:.4f}, "
                       f"Reg = {reg:.6e}")
-                
+
                 # Check convergence
                 if len(cost_history) > 1:
                     if cost_reduction < self.tol:
                         print(f"Converged! Cost reduction ({cost_reduction:.6e}) < tolerance ({self.tol:.6e})")
                         break
-                
+
                 # Update regularization
                 if best_cost < cost_history[-2] if len(cost_history) > 1 else True:
                     reg = max(reg / self.reg_factor, self.reg_min)
@@ -496,6 +429,6 @@ class DDP:
                 # No improvement, increase regularization
                 reg = min(reg * self.reg_factor, self.reg_max)
                 print(f"Iteration {iteration + 1}: No improvement, reg = {reg:.6e}")
-        
+
         return states, controls, cost_history
 
