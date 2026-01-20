@@ -89,7 +89,7 @@ def main():
     terminal_cost = cost.TerminalCost(
         goal_quaternion=goal_quat,
         goal_joints=goal_joints,
-        orientation_weight=10.0,  # High weight for orientation
+        orientation_weight=20.0,  # High weight for orientation
         joint_weight=5.0,  # Weight for joint goal
         device=device
     )

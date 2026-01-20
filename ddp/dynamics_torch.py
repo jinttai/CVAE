@@ -80,6 +80,101 @@ def skew_symmetric(v):
     ])
 
 
+def rot_from_omega_exponential(wb, dt):
+    """
+    Calculate rotation matrix from angular velocity using exponential map.
+    R_delta = exp([ω]_× * dt)
+    Uses Rodrigues' formula: exp([ω]_× * dt) = I + sin(θ)*[ω̂]_× + (1-cos(θ))*[ω̂]_×²
+    
+    Args:
+        wb: [3] angular velocity vector
+        dt: scalar time step
+    
+    Returns:
+        R_delta: [3, 3] rotation matrix
+    """
+    device = wb.device
+    dtype = wb.dtype
+    
+    # Calculate rotation angle
+    wb_norm = torch.linalg.norm(wb)
+    # Clamp theta to prevent numerical instability from very large angular velocities
+    # Maximum rotation per step: π radians (180 degrees)
+    max_theta = 3.141592653589793  # π
+    theta = torch.clamp(wb_norm * dt, max=max_theta)
+    
+    # Small angle approximation for numerical stability
+    eps = 1e-8
+    I = torch.eye(3, device=device, dtype=dtype)
+    
+    # Compute axis (normalized) - reuse wb_norm calculation
+    axis = wb / (wb_norm + 1e-12)
+    K = skew_symmetric(axis)
+    
+    # General Rodrigues' formula
+    sin_theta = torch.sin(theta)
+    cos_theta = torch.cos(theta)
+    K_squared = K @ K
+    R_big = I + sin_theta * K + (1.0 - cos_theta) * K_squared
+    
+    # Small angle approximation: R ≈ I + [ω*dt]_×
+    wb_dt = wb * dt
+    K_small = skew_symmetric(wb_dt)
+    R_small = I + K_small
+    
+    # Select based on angle size (vmap-compatible)
+    # Compute both cases, then select using torch.where to maintain gradient flow
+    small = theta < eps
+    # Broadcasting: small is scalar, R_small and R_big are [3, 3]
+    # For scalar condition, torch.where broadcasts automatically
+    R_delta = torch.where(small, R_small, R_big)
+    
+    return R_delta
+
+
+def rot_to_quat(R):
+    """
+    Convert rotation matrix R (3x3) to quaternion [x, y, z, w].
+    """
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+    
+    def safe_sqrt(x):
+        return torch.sqrt(torch.clamp(x, min=1e-8))
+    
+    if trace > 0:
+        # Case 1: trace > 0
+        S = safe_sqrt(trace + 1.0) * 2
+        w = 0.25 * S
+        x = (R[2, 1] - R[1, 2]) / S
+        y = (R[0, 2] - R[2, 0]) / S
+        z = (R[1, 0] - R[0, 1]) / S
+    else:
+        if R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            # Case 2: r00 is max
+            S = safe_sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+            w = (R[2, 1] - R[1, 2]) / S
+            x = 0.25 * S
+            y = (R[0, 1] + R[1, 0]) / S
+            z = (R[0, 2] + R[2, 0]) / S
+        elif R[1, 1] > R[2, 2]:
+            # Case 3: r11 is max
+            S = safe_sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+            w = (R[0, 2] - R[2, 0]) / S
+            x = (R[0, 1] + R[1, 0]) / S
+            y = 0.25 * S
+            z = (R[1, 2] + R[2, 1]) / S
+        else:
+            # Case 4: r22 is max
+            S = safe_sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+            w = (R[1, 0] - R[0, 1]) / S
+            x = (R[0, 2] + R[2, 0]) / S
+            y = (R[1, 2] + R[2, 1]) / S
+            z = 0.25 * S
+    
+    q = torch.stack([x, y, z, w])
+    return normalize_quat(q)
+
+
 class SpaceRobotDynamics:
     """
     Differentiable dynamics model for space robot.
@@ -160,10 +255,13 @@ class SpaceRobotDynamics:
         # Extract angular velocity (first 3 elements)
         wb = u0_sol[:3]  # [3] angular velocity in body frame
         
-        # --- Update quaternion using angular velocity ---
-        # Quaternion derivative: dq/dt = 0.5 * q * [0, wx, wy, wz]
-        q_dot = spart.quat_dot(q_base, wb)  # [4]
-        q_base_next = normalize_quat(q_base + dt * q_dot)
+        # --- Update rotation using exponential map ---
+        # R_new = R_old @ exp([ω]_× * dt)
+        R_delta = rot_from_omega_exponential(wb, dt)  # [3, 3]
+        R_base_next = R_base @ R_delta  # [3, 3]
+        
+        # Convert rotation matrix back to quaternion
+        q_base_next = rot_to_quat(R_base_next)  # [4]
         
         # --- Update joint angles (simple integration) ---
         q_joints_next = q_joints + dt * control
