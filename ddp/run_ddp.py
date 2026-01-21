@@ -121,6 +121,7 @@ def main():
         tol=1e-4,
         reg_init=1.0,
         use_full_ddp=use_full_ddp,
+        terminal_control_weight=1.0,  # Final joint velocity penalty weight
         device=device
     )
     

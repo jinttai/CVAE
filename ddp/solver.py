@@ -236,7 +236,7 @@ class DDP:
     def __init__(self, dynamics_model, running_cost, terminal_cost, 
                  max_iter=50, tol=1e-4, reg_init=1.0, reg_min=1e-6, reg_max=1e6,
                  reg_factor=10.0, line_search_alpha=0.5, line_search_beta=0.8, 
-                 use_full_ddp=True, device='cpu'):
+                 use_full_ddp=True, terminal_control_weight=0.0, device='cpu'):
         """
         Args:
             dynamics_model: SpaceRobotDynamics instance
@@ -252,6 +252,7 @@ class DDP:
             line_search_beta: line search step size reduction
             use_full_ddp: if True, include dynamics curvature terms (slower but more accurate)
                          if False, use iLQR approximation (faster)
+            terminal_control_weight: weight for final control (joint velocity) penalty
         """
         self.dynamics = dynamics_model
         self.running_cost = running_cost
@@ -265,6 +266,7 @@ class DDP:
         self.line_search_alpha = line_search_alpha
         self.line_search_beta = line_search_beta
         self.use_full_ddp = use_full_ddp
+        self.terminal_control_weight = terminal_control_weight
         
         self.device = device if device else dynamics_model.device
     
@@ -390,11 +392,16 @@ class DDP:
             # Step dynamics
             new_states[t + 1] = self.dynamics.step(new_states[t], new_controls[t], dt)
             
-            # Accumulate cost
+            # Accumulate running cost
             total_cost = total_cost + self.running_cost(new_states[t], new_controls[t])
         
-        # Terminal cost
+        # Terminal state cost
         total_cost = total_cost + self.terminal_cost(new_states[-1])
+
+        # Terminal control (joint velocity) cost on final control input
+        if self.terminal_control_weight != 0.0:
+            final_control = new_controls[-1]
+            total_cost = total_cost + self.terminal_control_weight * torch.sum(final_control ** 2)
         
         return new_states, new_controls, total_cost
     
@@ -429,6 +436,11 @@ class DDP:
         for t in range(controls.shape[0]):
             initial_cost = initial_cost + self.running_cost(states[t], controls[t])
         initial_cost = initial_cost + self.terminal_cost(states[-1])
+
+        # Terminal control cost for initial trajectory
+        if self.terminal_control_weight != 0.0:
+            final_control = controls[-1]
+            initial_cost = initial_cost + self.terminal_control_weight * torch.sum(final_control ** 2)
         
         cost_history = [initial_cost.item()]
         
