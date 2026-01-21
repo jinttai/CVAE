@@ -99,19 +99,19 @@ def main():
     dynamics_model = dynamics.SpaceRobotDynamics(robot, device=device)
 
     # Initial state: [joint_angles (6), base_quaternion (4)]
-    q_joints_init = torch.zeros(6, device=device)  # all joints at zero
-    q_base_init = torch.tensor([0.0, 0.0, 0.0, 1.0], device=device)
+    q_joints_init = torch.zeros(6, device=device, dtype=torch.float32)  # all joints at zero
+    q_base_init = torch.tensor([0.0, 0.0, 0.0, 1.0], device=device, dtype=torch.float32)
     initial_state = torch.cat([q_joints_init, q_base_init], dim=0)  # [10]
 
     # Goal orientation: 15 deg roll, 15 deg pitch, -15 deg yaw
     roll_deg, pitch_deg, yaw_deg = 15.0, 15.0, -15.0
-    roll_rad = torch.tensor(np.deg2rad(roll_deg), device=device)
-    pitch_rad = torch.tensor(np.deg2rad(pitch_deg), device=device)
-    yaw_rad = torch.tensor(np.deg2rad(yaw_deg), device=device)
+    roll_rad = torch.tensor(np.deg2rad(roll_deg), device=device, dtype=torch.float32)
+    pitch_rad = torch.tensor(np.deg2rad(pitch_deg), device=device, dtype=torch.float32)
+    yaw_rad = torch.tensor(np.deg2rad(yaw_deg), device=device, dtype=torch.float32)
     goal_quat = euler_to_quaternion(roll_rad, pitch_rad, yaw_rad)
 
     # Goal joint angles: zero (for now)
-    goal_joints = torch.zeros(6, device=device)
+    goal_joints = torch.zeros(6, device=device, dtype=torch.float32)
 
     print(f"Initial orientation: Identity")
     print(f"Initial joints: {q_joints_init.cpu().numpy()}")
@@ -163,7 +163,7 @@ def main():
     )
 
     # Condition: start/goal quaternions (start: identity, goal: target orientation)
-    q0_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device)
+    q0_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
     q0_goal = goal_quat.unsqueeze(0)  # [1, 4]
     condition = torch.cat([q0_start, q0_goal], dim=1)  # [1, 8]
 
@@ -171,13 +171,13 @@ def main():
     print(f"\n[Warm-Start] CVAE sampling: {num_samples} candidates ...")
 
     with torch.no_grad():
-        z = torch.randn(num_samples, LATENT_DIM, device=device)
+        z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
         cond_batch = condition.repeat(num_samples, 1)
         candidates = cvae_model.decode(cond_batch, z)  # [num_samples, OUTPUT_DIM]
 
         # Joint start/end are explicitly zero for all samples
-        q_start_joint_batch = torch.zeros(num_samples, robot["n_q"], device=device)
-        q_end_joint_batch = torch.zeros(num_samples, robot["n_q"], device=device)
+        q_start_joint_batch = torch.zeros(num_samples, robot["n_q"], device=device, dtype=torch.float32)
+        q_end_joint_batch = torch.zeros(num_samples, robot["n_q"], device=device, dtype=torch.float32)
 
         q0_start_batch = q0_start.repeat(num_samples, 1)
         q0_goal_batch = q0_goal.repeat(num_samples, 1)
@@ -207,8 +207,8 @@ def main():
 
     # Generate single joint trajectory (start/end joint = 0)
     with torch.no_grad():
-        q_start_joint_single = torch.zeros(1, robot["n_q"], device=device)
-        q_end_joint_single = torch.zeros(1, robot["n_q"], device=device)
+        q_start_joint_single = torch.zeros(1, robot["n_q"], device=device, dtype=torch.float32)
+        q_end_joint_single = torch.zeros(1, robot["n_q"], device=device, dtype=torch.float32)
         q_traj, q_dot_traj = physics.generate_trajectory(
             best_waypoints,
             q_start=q_start_joint_single,
