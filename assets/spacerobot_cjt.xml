@@ -38,17 +38,17 @@
             <geom type="mesh" contype="2" conaffinity="1" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="forearm"/>
             <geom type="mesh" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1" mesh="forearm"/>
             <body name="wrist_1_link" pos="0 0 0.571" quat="0.707105 0 0.707108 0">
-              <inertial pos="0 0.135 0" quat="0.5 0.5 -0.5 0.5" mass="1.96" diaginertia="0.0055125 0.005108 0.005108"/>
+              <inertial pos="0 0.135 0" mass="1.96" diaginertia="0.005108 0.005108 0.0055125"/>
               <joint name="wrist_1_joint" pos="0 0 0" axis="0 1 0" range="-6.28318 6.28318" actuatorfrcrange="-54 54"/>
               <geom type="mesh" contype="2" conaffinity="1" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="wrist1"/>
               <geom type="mesh" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1" mesh="wrist1"/>
               <body name="wrist_2_link" pos="0 0.135 0">
-                <inertial pos="0 0 0.12" quat="0.5 0.5 -0.5 0.5" mass="1.96" diaginertia="0.0055125 0.005108 0.005108"/>
+                <inertial pos="0 0 0.12" mass="1.96" diaginertia="0.005108 0.005108 0.0055125"/>
                 <joint name="wrist_2_joint" pos="0 0 0" axis="0 0 1" range="-6.28318 6.28318" actuatorfrcrange="-54 54"/>
                 <geom type="mesh" contype="2" conaffinity="1" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="wrist2"/>
                 <geom type="mesh" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1" mesh="wrist2"/>
                 <body name="wrist_3_link" pos="0 0 0.12">
-                  <inertial pos="0 0.092 0" quat="0.5 0.5 -0.5 0.5" mass="0.202" diaginertia="0.000205 0.000144 0.000144"/>
+                  <inertial pos="0 0.092 0" quat="0.7071068 0.7071068 0 0" mass="10.202" diaginertia="0.010144 0.010144 0.010205"/>
                   <joint name="wrist_3_joint" pos="0 0 0" axis="0 1 0" range="-6.28318 6.28318" actuatorfrcrange="-54 54"/>
                   <geom type="mesh" contype="2" conaffinity="1" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="wrist3"/>
                   <geom type="mesh" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1" mesh="wrist3"/>
