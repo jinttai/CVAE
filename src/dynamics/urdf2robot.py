@@ -247,6 +247,17 @@ def urdf2robot(filename, verbose_flag=False):
                 # A moving joint must have an axis
                 raise ValueError(f"Joint {joint_name} is moving but has no axis.")
 
+        # <limit>
+        limit_el = joint_xml.find('limit')
+        joint_info['limit'] = {'lower': -1e9, 'upper': 1e9} # Default to large range
+        if limit_el is not None:
+            lower_str = limit_el.attrib.get('lower')
+            upper_str = limit_el.attrib.get('upper')
+            if lower_str:
+                joint_info['limit']['lower'] = float(lower_str)
+            if upper_str:
+                joint_info['limit']['upper'] = float(upper_str)
+
         # <parent>
         parent_el = joint_xml.find('parent')
         if parent_el is not None:
@@ -319,6 +330,7 @@ def urdf2robot(filename, verbose_flag=False):
             'parent_link': parent_id,
             'child_link': link_id + 1,  # new link will get assigned
             'axis': jinfo['axis'],
+            'limit': jinfo['limit'],
             'T': jinfo['T']
         }
         # If it's revolute or prismatic, assign a q_id

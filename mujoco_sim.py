@@ -5,6 +5,7 @@ import mujoco.viewer
 import pandas as pd
 import sys
 import os
+import matplotlib.pyplot as plt
 
 # Add src to sys.path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -117,6 +118,11 @@ def run_simulation():
     Kd = 50.0
     
     # 4. Simulation Loop
+    # Data logging
+    sim_q_log = []
+    sim_quat_log = []
+    sim_t_log = []
+
     with mujoco.viewer.launch_passive(model, data) as viewer:
         start_time = time.time()
         sim_time = 0.0
@@ -151,6 +157,11 @@ def run_simulation():
         while viewer.is_running():
             step_start = time.time()
             
+            # Check for end of trajectory
+            if sim_time >= times[-1]:
+                print("Trajectory finished.")
+                break
+
             # 1. Get Reference for current sim_time
             # Find index
             idx = np.searchsorted(times, sim_time)
@@ -165,7 +176,8 @@ def run_simulation():
             
             q_ref = (1-alpha)*q_traj[idx] + alpha*q_traj[idx+1]
             qd_ref = (1-alpha)*qd_traj[idx] + alpha*qd_traj[idx+1]
-            qdd_ref = (1-alpha)*qdd_traj[idx] + alpha*qdd_traj[idx+1]
+            # qdd_ref is not used for CTC as requested (qdd_ref = 0)
+            # qdd_ref = (1-alpha)*qdd_traj[idx] + alpha*qdd_traj[idx+1]
             
             # Slerp for Quaternion
             # ... lazy linear interp for now, or use nearest
@@ -175,41 +187,47 @@ def run_simulation():
             w_ref = w_base_traj[idx] # Use body frame w
             dw_ref = dw_base_traj[idx]
             
-            # 2. Inverse Dynamics for Feedforward
-            # Set data_ref
-            data_ref.qpos[0:3] = np.zeros(3)
-            data_ref.qpos[3:7] = quat_ref
-            data_ref.qpos[7:] = q_ref
+            # 2. Computed Torque Control (CTC)
+            # We use data_ref to calculate Inverse Dynamics on the CURRENT state
+            # Target Acceleration = Kp * error + Kd * error_dot (No feedforward accel)
             
-            data_ref.qvel[0:3] = np.zeros(3)
-            data_ref.qvel[3:6] = w_ref
-            data_ref.qvel[6:] = qd_ref
+            # Set Current State to data_ref
+            data_ref.qpos[:] = data.qpos[:]
+            data_ref.qvel[:] = data.qvel[:]
             
-            data_ref.qacc[0:3] = np.zeros(3)
-            data_ref.qacc[3:6] = dw_ref
-            data_ref.qacc[6:] = qdd_ref
-            
-            mujoco.mj_inverse(model, data_ref)
-            
-            # Feedforward Torque (projected to joints)
-            # data_ref.qfrc_inverse is (nv,). First 6 are base.
-            tau_ff = data_ref.qfrc_inverse[6:]
-            
-            # Check Base Force (Should be small if trajectory is feasible)
-            base_force = np.linalg.norm(data_ref.qfrc_inverse[0:6])
-            # if base_force > 10.0:
-            #     print(f"Warning: Large base force required: {base_force:.2f}")
-            
-            # 3. PD Control
-            # Errors
+            # Calculate Errors
             q_err = q_ref - data.qpos[7:]
             qd_err = qd_ref - data.qvel[6:]
             
-            tau_pd = Kp * q_err + Kd * qd_err
+            # Desired Joint Acceleration (PID term only)
+            # Gains: Standard for 1-3, Half for 4-6
+            Kp_vec = np.array([Kp]*3 + [Kp*0.5]*3)
+            Kd_vec = np.array([Kd]*3 + [Kd*0.5]*3)
+            
+            qacc_des_joints = Kp_vec * q_err + Kd_vec * qd_err
+            
+            # Set Target Acceleration
+            # Base accel: 0 (Unactuated, we don't try to control it via ID here)
+            data_ref.qacc[0:6] = np.zeros(6)
+            # Joint accel: Desired
+            data_ref.qacc[6:] = qacc_des_joints
+            
+            # Run Inverse Dynamics: tau = M(q) * qacc_des + C(q, qdot) + G(q)
+            mujoco.mj_inverse(model, data_ref)
+            
+            # Extract Actuator Torques
+            # The first 6 DOFs in qfrc_inverse are for the base (unactuated).
+            # The next 6 are for the joints.
+            tau_ctc = data_ref.qfrc_inverse[6:]
             
             # Total Control
-            data.ctrl[:] = tau_ff + tau_pd
+            data.ctrl[:] = tau_ctc
             
+            # Log data
+            sim_q_log.append(data.qpos[7:].copy())
+            sim_quat_log.append(data.qpos[3:7].copy())
+            sim_t_log.append(sim_time)
+
             # 4. Step
             mujoco.mj_step(model, data)
             sim_time += model.opt.timestep
@@ -217,9 +235,53 @@ def run_simulation():
             viewer.sync()
             
             # Real-time sync
-            time_until_next_step = model.opt.timestep - (time.time() - step_start)
-            if time_until_next_step > 0:
-                time.sleep(time_until_next_step)
+            # time_until_next_step = model.opt.timestep - (time.time() - step_start)
+            # if time_until_next_step > 0:
+            #     time.sleep(time_until_next_step)
+
+    # Plot Comparison
+    sim_q_log = np.array(sim_q_log)
+    sim_quat_log = np.array(sim_quat_log)
+    sim_t_log = np.array(sim_t_log)
+    
+    print("Plotting results...")
+    
+    # Plot Joints
+    fig, axes = plt.subplots(6, 1, figsize=(10, 12), sharex=True)
+    
+    for i in range(6):
+        ax = axes[i]
+        # Plot Reference
+        ax.plot(times, q_traj[:, i], 'k--', label='Reference', linewidth=2)
+        # Plot Simulation
+        ax.plot(sim_t_log, sim_q_log[:, i], 'r-', label='Simulation', linewidth=1.5)
+        
+        ax.set_ylabel(f'Joint {i+1} [rad]')
+        ax.grid(True)
+        if i == 0:
+            ax.legend()
+            
+    axes[-1].set_xlabel('Time [s]')
+    plt.suptitle('Joint Trajectory Tracking (CTC)')
+    plt.tight_layout()
+    
+    # Plot Base Orientation
+    fig2, axes2 = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+    quat_labels = ['w', 'x', 'y', 'z']
+    
+    for i in range(4):
+        ax = axes2[i]
+        ax.plot(times, quat_traj[:, i], 'k--', label='Reference', linewidth=2)
+        ax.plot(sim_t_log, sim_quat_log[:, i], 'b-', label='Simulation', linewidth=1.5)
+        ax.set_ylabel(f'Quat {quat_labels[i]}')
+        ax.grid(True)
+        if i == 0: ax.legend()
+        
+    axes2[-1].set_xlabel('Time [s]')
+    plt.suptitle('Base Orientation Tracking (Quaternion)')
+    plt.tight_layout()
+    
+    plt.show()
 
 if __name__ == "__main__":
     run_simulation()

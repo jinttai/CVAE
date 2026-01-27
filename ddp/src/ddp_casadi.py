@@ -155,8 +155,8 @@ class CasadiSpaceRobotDynamics:
         # Momentum conservation constraint:
         #   H0 * u0 + H0m * qd = 0  ->  u0 = - H0^{-1} H0m qd
         rhs = -H0m @ u
-        # Use matrix inversion instead of ca.solve to avoid QR plugin dependency
-        u0 = ca.mtimes(ca.inv(H0), rhs)
+        # Use ca.solve instead of inv for better stability
+        u0 = ca.solve(H0, rhs)
 
         # Base angular velocity (body-fixed) is first 3 components of u0
         wb = u0[0:3]

@@ -126,19 +126,41 @@ def main():
     x0 = np.concatenate([q0, qd0, q_base0])
 
     # Goal orientation & joints
-    roll_deg, pitch_deg, yaw_deg = 20.0, 170.0, -15.0
+    roll_deg, pitch_deg, yaw_deg = 150.0, 150.0, -15.0
     roll = np.deg2rad(roll_deg)
     pitch = np.deg2rad(pitch_deg)
     yaw = np.deg2rad(yaw_deg)
     q_goal = euler_to_quaternion(roll, pitch, yaw)
-    goal_joints = np.zeros(n_q)
+    goal_joints = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
 
     print(f"Initial orientation: Identity")
     print(f"Goal orientation: Roll={roll_deg}°, Pitch={pitch_deg}°, Yaw={yaw_deg}°")
 
     # Costs
     # R_weight applies to control input u (acceleration)
-    running_cost = CasadiRunningCost(R_weight=0.01, n_u=n_q)
+    # Extract joint limits from robot model (if available)
+    # The urdf2robot parser provides limits in radians (default URDF standard)
+    joint_limits = None
+    if 'joints' in robot:
+        # Filter only moving joints (q_id != -1) and sort by q_id
+        moving_joints = [j for j in robot['joints'] if j['q_id'] != -1]
+        moving_joints.sort(key=lambda x: x['q_id'])
+        
+        if len(moving_joints) == n_q:
+            jl_lower = np.array([j['limit']['lower'] for j in moving_joints])
+            jl_upper = np.array([j['limit']['upper'] for j in moving_joints])
+            joint_limits = (jl_lower, jl_upper)
+            print("Joint limits loaded from URDF (rad):")
+            print(f"  Lower: {jl_lower}")
+            print(f"  Upper: {jl_upper}")
+            
+    running_cost = CasadiRunningCost(
+        R_weight=0.01, 
+        n_u=n_q, 
+        joint_limits=joint_limits,
+        mu_init=1.0,        # Initial ALM penalty parameter
+        lambda_init=0.0,    # Initial Lagrange multipliers
+    )
     
     # Terminal cost
     terminal_cost = CasadiTerminalCost(
@@ -157,6 +179,7 @@ def main():
     # SWITCH: Choose between iLQR and DDP
     # ============================================================================
     USE_ILQR = True  # Set to True for iLQR (faster), False for full DDP (slower, more accurate)
+    USE_ALM = True   # Set to True to use Augmented Lagrangian Method for joint limits
     # ============================================================================
 
     solver = CasadiDDP(
@@ -164,20 +187,31 @@ def main():
         running_cost=running_cost,
         terminal_cost=terminal_cost,
         max_iter=500,
-        tol=1e-6,
+        tol=1e-4,
         use_full_ddp=not USE_ILQR,
     )
 
     method_name = "iLQR" if USE_ILQR else "DDP"
+    constraint_method = "ALM" if USE_ALM else "Barrier"
     print(f"\nStarting CasADi {method_name} optimization (Acceleration Control)...")
     if USE_ILQR:
         print("Mode: iLQR (dynamics curvature terms disabled - faster)")
     else:
         print("Mode: Full DDP (dynamics curvature terms enabled - more accurate)")
+    print(f"Constraint handling: {constraint_method}")
     print("-" * 50)
     start_time = time.time()
     
-    X_opt, U_opt, cost_history = solver.solve(x0, U0, dt)
+    if USE_ALM:
+        # Use Augmented Lagrangian outer loop for constraint handling
+        X_opt, U_opt, cost_history = solver.solve_alm(
+            x0, U0, dt,
+            alm_max_iter=10,          # Max ALM outer iterations
+            constraint_tol=1e-4,       # Constraint satisfaction tolerance
+            mu_increase_factor=10.0,   # Penalty increase factor
+        )
+    else:
+        X_opt, U_opt, cost_history = solver.solve(x0, U0, dt)
     
     elapsed_time = time.time() - start_time
 
@@ -187,6 +221,7 @@ def main():
     print(f"Final   cost: {cost_history[-1]:.6f}")
     print(f"Cost reduction: {cost_history[0] - cost_history[-1]:.6f}")
     print(f"Iterations  : {len(cost_history) - 1}")
+    print(f"time per iteration: {elapsed_time / (len(cost_history) - 1):.3f} seconds")
 
     # --- Compute final errors ---
     # State structure: [q(n_q), qd(n_q), q_base(4)]
@@ -225,10 +260,10 @@ def main():
     plt.plot(cost_history, 'b-', linewidth=2)
     plt.xlabel('Iteration')
     plt.ylabel('Total Cost')
-    plt.title(f'CasADi {method_name} Cost History')
+    plt.title(f'CasADi {method_name} Cost History ({constraint_method})')
     plt.grid(True, alpha=0.3)
     plt.yscale('log')
-    plt.savefig(os.path.join(results_dir, f"cost_history_casadi_{method_name.lower()}.png"), dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(results_dir, f"cost_history_casadi_{method_name.lower()}_{constraint_method.lower()}.png"), dpi=150, bbox_inches='tight')
     plt.close()
 
     # 2. Trajectory Overview
@@ -249,9 +284,19 @@ def main():
     
     # Goal lines for quaternion
     # q_goal is [x, y, z, w]
+    # Check if final quaternion is flipped relative to goal.
+    # If dot(q_final, q_goal) < 0, they are in opposite hemispheres.
+    # For visualization, we flip q_goal to match q_final's hemisphere.
+    final_q = quaternions[-1]
+    if np.dot(final_q, q_goal) < 0:
+        q_goal_plot = -q_goal
+        print("Note: Goal quaternion flipped for visualization to match final state hemisphere.")
+    else:
+        q_goal_plot = q_goal
+
     q_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
     for i in range(4):
-        axes[0, 0].axhline(y=q_goal[i], color=q_colors[i], linestyle='--', alpha=0.5)
+        axes[0, 0].axhline(y=q_goal_plot[i], color=q_colors[i], linestyle='--', alpha=0.5)
 
     # [0,1] Orientation Error
     errors = []
@@ -269,9 +314,9 @@ def main():
     axes[0, 1].axhline(y=0, color='k', linestyle='--', alpha=0.3)
 
     # [1,0] Joint Angles
-    axes[1, 0].plot(time_steps, X_opt[:, :n_q])
+    axes[1, 0].plot(time_steps, np.rad2deg(X_opt[:, :n_q]))
     axes[1, 0].set_xlabel('Time (s)')
-    axes[1, 0].set_ylabel('Joint Angle (rad)')
+    axes[1, 0].set_ylabel('Joint Angle (deg)')
     axes[1, 0].set_title(f'Joint Angles')
     axes[1, 0].grid(True, alpha=0.3)
     axes[1, 0].legend([f'J{i+1}' for i in range(n_q)], loc='upper right', fontsize='small', ncol=2)
@@ -284,7 +329,7 @@ def main():
     axes[1, 1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(results_dir, f"trajectory_casadi_{method_name.lower()}_combined.png"), dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(results_dir, f"trajectory_casadi_{method_name.lower()}_{constraint_method.lower()}_combined.png"), dpi=150, bbox_inches='tight')
     plt.close()
 
     print("Saved plots to results directory.")

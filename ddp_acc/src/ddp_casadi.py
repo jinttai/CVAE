@@ -14,6 +14,7 @@ from src.dynamics.urdf2robot import urdf2robot
 import src.dynamics.spart_casadi as spart
 
 
+
 class CasadiSpaceRobotDynamics:
     """
     Floating-base space robot dynamics in CasADi using SPART formulation.
@@ -136,8 +137,8 @@ class CasadiSpaceRobotDynamics:
         # Here qd is qd_joints (from state)
         rhs = -H0m @ qd_joints
         
-        # Use matrix inversion 
-        u0 = ca.mtimes(ca.inv(H0), rhs)
+        # Use ca.solve instead of inv for better stability
+        u0 = ca.solve(H0, rhs)
 
         # Base angular velocity (body-fixed) is first 3 components of u0
         wb = u0[0:3]
@@ -204,35 +205,190 @@ class CasadiSpaceRobotDynamics:
 
 class CasadiRunningCost:
     """
-    Running cost L(x, u) = u^T R u.
+    Running cost L(x, u) = u^T R u + Augmented Lagrangian penalty for joint limits.
     u is now joint acceleration.
+    
+    Uses Augmented Lagrangian Method (ALM) for joint limit constraints:
+        g_lower[i] = q_min[i] - q[i] <= 0  (lower bound)
+        g_upper[i] = q[i] - q_max[i] <= 0  (upper bound)
+    
+    ALM penalty for each constraint g <= 0:
+        phi(g, lambda, mu) = (mu/2) * max(0, g + lambda/mu)^2 - lambda^2 / (2*mu)
     """
 
-    def __init__(self, R_weight: float | np.ndarray, n_u: int = 6):
+    def __init__(
+        self, 
+        R_weight: float | np.ndarray, 
+        n_u: int = 6, 
+        joint_limits: tuple[np.ndarray, np.ndarray] | None = None,
+        mu_init: float = 1.0,
+        lambda_init: float = 0.0,
+    ):
         if np.isscalar(R_weight):
             self.R = float(R_weight) * np.eye(n_u)
         else:
             self.R = np.asarray(R_weight, dtype=float)
         
         self.n_u = n_u
-        # n_x = 2*n_u + 4
         self.n_x = 2 * n_u + 4
-
+        
+        # Joint limits storage
+        if joint_limits is not None:
+            self.jl_lower = np.asarray(joint_limits[0], dtype=float)
+            self.jl_upper = np.asarray(joint_limits[1], dtype=float)
+            if self.jl_lower.shape[0] != n_u or self.jl_upper.shape[0] != n_u:
+                raise ValueError(f"Joint limits must have size {n_u}")
+            self.has_joint_limits = True
+        else:
+            self.jl_lower = -1e9 * np.ones(n_u)
+            self.jl_upper = 1e9 * np.ones(n_u)
+            self.has_joint_limits = False
+        
+        # Augmented Lagrangian parameters
+        # mu: penalty parameter (increases to enforce constraints)
+        # lambda_lower[i], lambda_upper[i]: Lagrange multipliers for each joint limit
+        self.mu = mu_init
+        self.lambda_lower = lambda_init * np.ones(n_u)  # multipliers for lower bounds
+        self.lambda_upper = lambda_init * np.ones(n_u)  # multipliers for upper bounds
+        
+        # Build symbolic cost function with ALM
+        self._build_cost_function()
+    
+    def _build_cost_function(self):
+        """Build CasADi symbolic cost function with current ALM parameters."""
         x = ca.SX.sym("x", self.n_x)
         u = ca.SX.sym("u", self.n_u)
-
-        L = ca.mtimes([u.T, self.R, u])
+        
+        # Base running cost: u^T R u
+        L_base = ca.mtimes([u.T, self.R, u])
+        
+        # Augmented Lagrangian penalty for joint limits
+        alm_penalty = 0.0
+        
+        if self.has_joint_limits:
+            for i in range(self.n_u):
+                q_i = x[i]
+                
+                # Lower bound constraint: g_lower = q_min - q <= 0
+                g_lower = self.jl_lower[i] - q_i
+                lambda_l = self.lambda_lower[i]
+                
+                # Upper bound constraint: g_upper = q - q_max <= 0
+                g_upper = q_i - self.jl_upper[i]
+                lambda_u = self.lambda_upper[i]
+                
+                # ALM penalty: phi(g, lambda, mu) = (mu/2) * max(0, g + lambda/mu)^2 - lambda^2/(2*mu)
+                # For numerical stability, we use ca.fmax
+                
+                # Lower bound penalty
+                z_lower = g_lower + lambda_l / self.mu
+                phi_lower = (self.mu / 2.0) * ca.fmax(0, z_lower)**2 - (lambda_l**2) / (2.0 * self.mu)
+                
+                # Upper bound penalty
+                z_upper = g_upper + lambda_u / self.mu
+                phi_upper = (self.mu / 2.0) * ca.fmax(0, z_upper)**2 - (lambda_u**2) / (2.0 * self.mu)
+                
+                alm_penalty += phi_lower + phi_upper
+        
+        L = L_base + alm_penalty
         self.L_fun = ca.Function("L_running", [x, u], [L])
-
+        
+        # Compute gradients and Hessians
         Lx = ca.gradient(L, x)
         Lu = ca.gradient(L, u)
         Lxx = ca.hessian(L, x)[0]
         Luu = ca.hessian(L, u)[0]
-
+        
         self.Lx_fun = ca.Function("Lx", [x, u], [Lx])
         self.Lu_fun = ca.Function("Lu", [x, u], [Lu])
         self.Lxx_fun = ca.Function("Lxx", [x, u], [Lxx])
         self.Luu_fun = ca.Function("Luu", [x, u], [Luu])
+        
+        # Constraint violation functions (for multiplier updates)
+        if self.has_joint_limits:
+            g_lower_vec = ca.SX.zeros(self.n_u)
+            g_upper_vec = ca.SX.zeros(self.n_u)
+            for i in range(self.n_u):
+                g_lower_vec[i] = self.jl_lower[i] - x[i]  # q_min - q
+                g_upper_vec[i] = x[i] - self.jl_upper[i]  # q - q_max
+            
+            self.g_lower_fun = ca.Function("g_lower", [x], [g_lower_vec])
+            self.g_upper_fun = ca.Function("g_upper", [x], [g_upper_vec])
+    
+    def update_multipliers(self, X: np.ndarray):
+        """
+        Update Lagrange multipliers based on constraint violations.
+        Called after each DDP solve iteration.
+        
+        Update rule: lambda_new = max(0, lambda + mu * g(x))
+        
+        Args:
+            X: State trajectory [T+1, n_x]
+        """
+        if not self.has_joint_limits:
+            return
+        
+        # Aggregate constraint violations over trajectory
+        T = X.shape[0]
+        max_g_lower = np.full(self.n_u, -np.inf)
+        max_g_upper = np.full(self.n_u, -np.inf)
+        
+        for t in range(T):
+            g_lower = np.array(self.g_lower_fun(X[t])).flatten()
+            g_upper = np.array(self.g_upper_fun(X[t])).flatten()
+            max_g_lower = np.maximum(max_g_lower, g_lower)
+            max_g_upper = np.maximum(max_g_upper, g_upper)
+        
+        # Update multipliers: lambda = max(0, lambda + mu * g)
+        self.lambda_lower = np.maximum(0.0, self.lambda_lower + self.mu * max_g_lower)
+        self.lambda_upper = np.maximum(0.0, self.lambda_upper + self.mu * max_g_upper)
+        
+        # Rebuild cost function with new multipliers
+        self._build_cost_function()
+    
+    def increase_penalty(self, factor: float = 10.0):
+        """
+        Increase penalty parameter mu.
+        Called when constraint violations are not decreasing fast enough.
+        """
+        self.mu *= factor
+        self._build_cost_function()
+    
+    def get_constraint_violations(self, X: np.ndarray) -> dict:
+        """
+        Compute maximum constraint violations over trajectory.
+        
+        Returns:
+            dict with 'lower' and 'upper' violations for each joint
+        """
+        if not self.has_joint_limits:
+            return {"lower": np.zeros(self.n_u), "upper": np.zeros(self.n_u)}
+        
+        T = X.shape[0]
+        max_g_lower = np.full(self.n_u, -np.inf)
+        max_g_upper = np.full(self.n_u, -np.inf)
+        
+        for t in range(T):
+            g_lower = np.array(self.g_lower_fun(X[t])).flatten()
+            g_upper = np.array(self.g_upper_fun(X[t])).flatten()
+            max_g_lower = np.maximum(max_g_lower, g_lower)
+            max_g_upper = np.maximum(max_g_upper, g_upper)
+        
+        # Positive values indicate violation
+        return {
+            "lower": np.maximum(0, max_g_lower),
+            "upper": np.maximum(0, max_g_upper),
+            "max_violation": max(np.max(np.maximum(0, max_g_lower)), 
+                                  np.max(np.maximum(0, max_g_upper)))
+        }
+    
+    def get_alm_info(self) -> dict:
+        """Return current ALM parameters for logging."""
+        return {
+            "mu": self.mu,
+            "lambda_lower": self.lambda_lower.copy(),
+            "lambda_upper": self.lambda_upper.copy(),
+        }
 
     def value(self, x: np.ndarray, u: np.ndarray) -> float:
         return float(self.L_fun(x, u))
@@ -474,7 +630,8 @@ class CasadiDDP:
 
     def solve(self, x0: np.ndarray, U0: np.ndarray, dt: float):
         """
-        Run iLQR/DDP optimization.
+        Run iLQR/DDP optimization with Augmented Lagrangian outer loop for constraints.
+        
         Returns:
             X_opt, U_opt, cost_history
         """
@@ -485,12 +642,16 @@ class CasadiDDP:
         cost_history = [J]
         reg = self.reg_init
 
-        print(f"{'Iter':<5} {'Cost':<12} {'Improvement':<12} {'Reg':<10} {'Alpha':<8}")
+        print(f"{'Iter':<5} {'Cost':<12} {'Improvement':<12} {'Reg':<10} {'Alpha':<8} {'MaxViol':<10}")
         
         # Initial terminal cost breakdown
         term_comps = self.terminal_cost.get_cost_components(X[-1])
         print(f"      Initial Terminal Costs -> Orient: {term_comps['orientation']:.4f}, "
               f"JointPos: {term_comps['joint_pos']:.4f}, JointVel: {term_comps['joint_vel']:.4f}")
+        
+        # Initial constraint violation
+        viol_info = self.running_cost.get_constraint_violations(X)
+        print(f"      Initial Max Constraint Violation: {viol_info['max_violation']:.6f}")
 
         for it in range(self.max_iter):
             k, K = self.backward_pass(X, U, dt, reg)
@@ -498,7 +659,7 @@ class CasadiDDP:
             if k is None:
                 reg = max(reg * self.reg_factor, 1e-6)
                 reg = min(reg, 1e9) 
-                print(f"{it:<5} {'REJECT (PD)':<12} {'-':<12} {reg:<10.2e} {'-':<8}")
+                print(f"{it:<5} {'REJECT (PD)':<12} {'-':<12} {reg:<10.2e} {'-':<8} {'-':<10}")
                 continue
 
             best_J = np.inf
@@ -518,14 +679,18 @@ class CasadiDDP:
 
             if best_X is None:
                 reg *= self.reg_factor
-                print(f"{it:<5} {'REJECT (LS)':<12} {'-':<12} {reg:<10.2e} {'-':<8}")
+                print(f"{it:<5} {'REJECT (LS)':<12} {'-':<12} {reg:<10.2e} {'-':<8} {'-':<10}")
                 continue
 
             improvement = J - best_J
             X, U, J = best_X, best_U, best_J
             cost_history.append(J)
+            
+            # Get constraint violation
+            viol_info = self.running_cost.get_constraint_violations(X)
+            max_viol = viol_info['max_violation']
 
-            print(f"{it:<5} {J:<12.6f} {improvement:<12.6f} {reg:<10.2e} {alpha:<8.4f}")
+            print(f"{it:<5} {J:<12.6f} {improvement:<12.6f} {reg:<10.2e} {alpha:<8.4f} {max_viol:<10.6f}")
 
             if improvement < self.tol:
                 print(f"Converged: Improvement < {self.tol}")
@@ -540,8 +705,92 @@ class CasadiDDP:
         term_comps = self.terminal_cost.get_cost_components(X[-1])
         print(f"\nFinal Terminal Costs -> Orient: {term_comps['orientation']:.4f}, "
               f"JointPos: {term_comps['joint_pos']:.4f}, JointVel: {term_comps['joint_vel']:.4f}")
+        
+        # Final constraint violation
+        viol_info = self.running_cost.get_constraint_violations(X)
+        print(f"Final Max Constraint Violation: {viol_info['max_violation']:.6f}")
 
         return X, U, cost_history
+    
+    def solve_alm(
+        self, 
+        x0: np.ndarray, 
+        U0: np.ndarray, 
+        dt: float,
+        alm_max_iter: int = 10,
+        constraint_tol: float = 1e-4,
+        mu_increase_factor: float = 10.0,
+    ):
+        """
+        Run DDP with Augmented Lagrangian outer loop for constraint handling.
+        
+        This method performs multiple DDP solves, updating Lagrange multipliers
+        and penalty parameters between solves until constraints are satisfied.
+        
+        Args:
+            x0: Initial state
+            U0: Initial control sequence
+            dt: Time step
+            alm_max_iter: Maximum number of ALM outer iterations
+            constraint_tol: Tolerance for constraint satisfaction
+            mu_increase_factor: Factor to increase penalty parameter
+        
+        Returns:
+            X_opt, U_opt, cost_history
+        """
+        U = np.array(U0, dtype=float)
+        all_cost_history = []
+        
+        print("=" * 80)
+        print("Augmented Lagrangian DDP Solver")
+        print("=" * 80)
+        
+        for alm_iter in range(alm_max_iter):
+            print(f"\n{'='*80}")
+            print(f"ALM Outer Iteration {alm_iter + 1}/{alm_max_iter}")
+            alm_info = self.running_cost.get_alm_info()
+            print(f"  mu = {alm_info['mu']:.4e}")
+            print(f"  lambda_lower = {alm_info['lambda_lower']}")
+            print(f"  lambda_upper = {alm_info['lambda_upper']}")
+            print("=" * 80)
+            
+            # Run inner DDP solve
+            X, U, cost_history = self.solve(x0, U, dt)
+            all_cost_history.extend(cost_history)
+            
+            # Check constraint violations
+            viol_info = self.running_cost.get_constraint_violations(X)
+            max_violation = viol_info['max_violation']
+            
+            print(f"\nALM Iter {alm_iter + 1}: Max Constraint Violation = {max_violation:.6e}")
+            
+            if max_violation < constraint_tol:
+                print(f"\n*** Constraints satisfied (violation < {constraint_tol}) ***")
+                break
+            
+            # Update Lagrange multipliers
+            self.running_cost.update_multipliers(X)
+            
+            # Check if we need to increase penalty
+            # Simple heuristic: increase penalty if violation not decreasing fast enough
+            if alm_iter > 0 and max_violation > 0.5 * prev_violation:
+                print(f"Increasing penalty parameter mu by factor {mu_increase_factor}")
+                self.running_cost.increase_penalty(mu_increase_factor)
+            
+            prev_violation = max_violation
+        
+        # Final summary
+        print("\n" + "=" * 80)
+        print("ALM Optimization Complete")
+        alm_info = self.running_cost.get_alm_info()
+        print(f"  Final mu = {alm_info['mu']:.4e}")
+        viol_info = self.running_cost.get_constraint_violations(X)
+        print(f"  Final Max Constraint Violation = {viol_info['max_violation']:.6e}")
+        print(f"  Lower bound violations: {viol_info['lower']}")
+        print(f"  Upper bound violations: {viol_info['upper']}")
+        print("=" * 80)
+        
+        return X, U, all_cost_history
 
 
 def load_robot_from_urdf(urdf_path: str) -> dict:
