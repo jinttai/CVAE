@@ -93,7 +93,7 @@ def generate_data_batch(physics, batch_size, n_q, num_waypoints, joint_min, join
 
 def main():
     parser = argparse.ArgumentParser(description="Generate reachable set data")
-    parser.add_argument("--num-samples", type=int, default=1000000,
+    parser.add_argument("--num-samples", type=int, default=100000000,
                         help="Total number of samples to generate (default: 1000000)")
     parser.add_argument("--batch-size", type=int, default=1024,
                         help="Batch size for data generation (default: 1024)")
