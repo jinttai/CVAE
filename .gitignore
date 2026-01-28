@@ -12,5 +12,6 @@ space_robot_planning_Rmat/runs/
 space_robot_planning_rk4/runs/
 space_robot_planning_Rmat/results/
 space_robot_planning_rk4/results/
+outputs/data/
 install-pyenv-win.ps1
 .python-version
