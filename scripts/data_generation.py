@@ -19,6 +19,7 @@ import math
 import argparse
 import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 # Add root directory to sys.path
 ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../"))
@@ -26,6 +27,209 @@ sys.path.append(ROOT_DIR)
 
 from src.training.physics_layer import PhysicsLayer
 from src.dynamics.urdf2robot_torch import urdf2robot
+
+
+def plot_distribution(data, labels, title, save_path, xlabel="Value (rad)", bins=50):
+    """
+    데이터 분포 히스토그램을 그리고 저장
+    
+    Args:
+        data: [N, num_features] 형태의 데이터
+        labels: 각 feature의 라벨 리스트
+        title: 그래프 제목
+        save_path: 저장 경로
+        xlabel: x축 라벨
+        bins: 히스토그램 bin 수
+    """
+    num_features = data.shape[1]
+    
+    # 그래프 레이아웃 결정 (2~3열)
+    if num_features <= 4:
+        ncols = 2
+    else:
+        ncols = 3
+    nrows = (num_features + ncols - 1) // ncols
+    
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows))
+    axes = axes.flatten() if num_features > 1 else [axes]
+    
+    for i in range(num_features):
+        ax = axes[i]
+        ax.hist(data[:, i], bins=bins, edgecolor='black', alpha=0.7)
+        ax.set_title(labels[i])
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Count")
+        ax.grid(True, alpha=0.3)
+    
+    # 빈 subplot 숨기기
+    for i in range(num_features, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
+def plot_quaternion_distribution(q_data, save_path, bins=50):
+    """
+    Quaternion 분포를 그리고 저장 (각 성분 + norm)
+    
+    Args:
+        q_data: [N, 4] quaternion 데이터 (x, y, z, w)
+        save_path: 저장 경로
+        bins: 히스토그램 bin 수
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+    axes = axes.flatten()
+    
+    labels = ['qx', 'qy', 'qz', 'qw']
+    
+    # 각 quaternion 성분
+    for i in range(4):
+        ax = axes[i]
+        ax.hist(q_data[:, i], bins=bins, edgecolor='black', alpha=0.7, color=f'C{i}')
+        ax.set_title(f'{labels[i]} Distribution')
+        ax.set_xlabel('Value')
+        ax.set_ylabel('Count')
+        ax.grid(True, alpha=0.3)
+    
+    # Quaternion norm 분포
+    q_norms = np.linalg.norm(q_data, axis=1)
+    axes[4].hist(q_norms, bins=bins, edgecolor='black', alpha=0.7, color='purple')
+    axes[4].set_title('Quaternion Norm')
+    axes[4].set_xlabel('Norm')
+    axes[4].set_ylabel('Count')
+    axes[4].grid(True, alpha=0.3)
+    
+    # 빈 subplot 숨기기
+    axes[5].set_visible(False)
+    
+    plt.suptitle('q_final (Final Orientation) Distribution', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
+def plot_all_distributions(start_joints, goal_joints, waypoints, q_finals, 
+                           n_q, num_waypoints, output_dir, output_name):
+    """
+    모든 데이터의 분포 그래프를 생성하고 저장
+    
+    Args:
+        start_joints: [N, n_q] 시작 관절 각도
+        goal_joints: [N, n_q] 목표 관절 각도
+        waypoints: [N, num_waypoints * n_q] 중간 waypoint
+        q_finals: [N, 4] 최종 orientation quaternion
+        n_q: 관절 수 (6)
+        num_waypoints: waypoint 수 (3)
+        output_dir: 출력 디렉토리
+        output_name: 출력 파일 이름 prefix
+    """
+    print("\n=== Saving Distribution Plots ===")
+    
+    # numpy로 변환
+    start_np = start_joints.numpy() if torch.is_tensor(start_joints) else start_joints
+    goal_np = goal_joints.numpy() if torch.is_tensor(goal_joints) else goal_joints
+    wp_np = waypoints.numpy() if torch.is_tensor(waypoints) else waypoints
+    q_np = q_finals.numpy() if torch.is_tensor(q_finals) else q_finals
+    
+    # degree로 변환 (시각화 편의)
+    start_deg = np.rad2deg(start_np)
+    goal_deg = np.rad2deg(goal_np)
+    wp_deg = np.rad2deg(wp_np)
+    
+    # 1. Start Joint 분포
+    joint_labels = [f'J{i+1}' for i in range(n_q)]
+    plot_distribution(
+        start_deg, joint_labels,
+        'Start Joint Distribution',
+        os.path.join(output_dir, f"{output_name}_dist_start_joint.png"),
+        xlabel="Angle (deg)"
+    )
+    
+    # 2. Goal Joint 분포
+    plot_distribution(
+        goal_deg, joint_labels,
+        'Goal Joint Distribution',
+        os.path.join(output_dir, f"{output_name}_dist_goal_joint.png"),
+        xlabel="Angle (deg)"
+    )
+    
+    # 3. Waypoint 분포 (각 waypoint별로)
+    for wp_idx in range(num_waypoints):
+        start_col = wp_idx * n_q
+        end_col = start_col + n_q
+        wp_labels = [f'WP{wp_idx+1}_J{i+1}' for i in range(n_q)]
+        plot_distribution(
+            wp_deg[:, start_col:end_col], wp_labels,
+            f'Waypoint {wp_idx+1} Distribution',
+            os.path.join(output_dir, f"{output_name}_dist_waypoint{wp_idx+1}.png"),
+            xlabel="Angle (deg)"
+        )
+    
+    # 4. q_final (Quaternion) 분포
+    plot_quaternion_distribution(
+        q_np,
+        os.path.join(output_dir, f"{output_name}_dist_q_final.png")
+    )
+    
+    # 5. 전체 요약 그래프 (모든 joint 한 눈에)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Start joints - all in one
+    ax = axes[0, 0]
+    for i in range(n_q):
+        ax.hist(start_deg[:, i], bins=50, alpha=0.5, label=f'J{i+1}')
+    ax.set_title('Start Joint (All Joints)')
+    ax.set_xlabel('Angle (deg)')
+    ax.set_ylabel('Count')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Goal joints - all in one
+    ax = axes[0, 1]
+    for i in range(n_q):
+        ax.hist(goal_deg[:, i], bins=50, alpha=0.5, label=f'J{i+1}')
+    ax.set_title('Goal Joint (All Joints)')
+    ax.set_xlabel('Angle (deg)')
+    ax.set_ylabel('Count')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # All waypoints - overlapped
+    ax = axes[1, 0]
+    colors = plt.cm.tab10(np.linspace(0, 1, num_waypoints))
+    for wp_idx in range(num_waypoints):
+        start_col = wp_idx * n_q
+        end_col = start_col + n_q
+        wp_all = wp_deg[:, start_col:end_col].flatten()
+        ax.hist(wp_all, bins=50, alpha=0.4, label=f'WP{wp_idx+1}', color=colors[wp_idx])
+    ax.set_title('Waypoints (All Values)')
+    ax.set_xlabel('Angle (deg)')
+    ax.set_ylabel('Count')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Quaternion components
+    ax = axes[1, 1]
+    q_labels = ['qx', 'qy', 'qz', 'qw']
+    for i in range(4):
+        ax.hist(q_np[:, i], bins=50, alpha=0.5, label=q_labels[i])
+    ax.set_title('q_final Components')
+    ax.set_xlabel('Value')
+    ax.set_ylabel('Count')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.suptitle('Data Distribution Summary', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    save_path = os.path.join(output_dir, f"{output_name}_dist_summary.png")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
 
 
 def generate_random_joints(batch_size, n_joints, joint_min, joint_max, device):
@@ -253,6 +457,12 @@ def main():
     # Quaternion norm 확인 (정규화 확인)
     q_norms = torch.norm(q_finals_tensor, dim=1)
     print(f"q_final norm - mean: {q_norms.mean().item():.6f}, std: {q_norms.std().item():.6f}")
+    
+    # 분포 그래프 저장
+    plot_all_distributions(
+        start_joints_tensor, goal_joints_tensor, waypoints_tensor, q_finals_tensor,
+        n_q, NUM_WAYPOINTS, output_dir, args.output_name
+    )
 
 
 if __name__ == "__main__":
