@@ -190,6 +190,7 @@ def main():
     ax.hist(finite_trained, bins=bins, alpha=0.6, label=f"CVAE trained (v5_joint_change) n={len(finite_trained)}", color="C0", density=True)
     ax.hist(finite_random, bins=bins, alpha=0.6, label=f"CVAE random weights n={len(finite_random)}", color="C1", density=True)
     ax.axvline(mlp_loss_val, color="C2", linestyle="-", linewidth=2, label=f"MLP (v4.pth) = {mlp_loss_val:.4f}")
+    ax.axvline(losses_cvae_trained_np.min(), color="C3", linestyle="-", linewidth=2, label=f"CVAE trained (v5_joint_change) min = {losses_cvae_trained_np.min():.4f}")
 
     ax.set_xlabel("Total loss")
     ax.set_ylabel("Density")
