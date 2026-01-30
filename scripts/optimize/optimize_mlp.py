@@ -293,7 +293,7 @@ def main():
     inference_start = time.time()
 
     # 학습 스크립트(train_mlp.py)에서 저장한 가중치 경로와 동일하게 맞춤
-    mlp_weights_path = os.path.join(ROOT_DIR, "outputs/weights/mlp_debug/v3.pth")
+    mlp_weights_path = os.path.join(ROOT_DIR, "outputs/weights/mlp_debug/v4.pth")
     mlp_model = load_model(
         mlp_weights_path,
         COND_DIM,
@@ -330,9 +330,11 @@ def main():
     print(f"Initial waypoints (on CPU): {waypoints_param}")
 
     # (C) LBFGS 최적화 (CPU 텐서 사용)
-    optimizer = optim.AdamW(
+    optimizer = optim.LBFGS(
         [waypoints_param],
-        lr=1e-2  # 기본 러닝레이트, 필요시 하이퍼파라미터 조정 가능
+        lr=1e-3,
+        max_iter=20,
+        line_search_fn='strong_wolfe'
     )
 
     loss_history = [best_loss]

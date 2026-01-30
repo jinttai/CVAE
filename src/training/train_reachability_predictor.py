@@ -213,7 +213,7 @@ def main():
     parser.add_argument("--data-path", type=str, default=None,
                         help="Path to reachable_set_binned.pt")
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--num-layers", type=int, default=5)

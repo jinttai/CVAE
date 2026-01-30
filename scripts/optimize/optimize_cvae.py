@@ -431,18 +431,13 @@ def main():
         opt_end = inference_end
     else:
         # =================================================================
-        # 2. LBFGS Refinement (GPU) - Batch optimize ALL samples together
-        #    (one batched LBFGS, losses reduced by sum)
+        # 2. LBFGS Refinement (GPU) - Optimize ONLY the best waypoint
         # =================================================================
-        print(f"\n--- LBFGS Refinement on {device} (batched over {num_samples} samples) ---")
+        print(f"\n--- LBFGS Refinement on {device} (best waypoint only) ---")
 
-        # Start from all CVAE candidates as initial waypoints
-        waypoints_param = candidates.clone().detach()
+        # Start from the best CVAE sample only
+        waypoints_param = best_waypoints.clone().detach()
         waypoints_param.requires_grad = True
-
-        # Batched start / goal (same start/goal for every sample)
-        q0_start_batch = q0_start.repeat(num_samples, 1)
-        q0_goal_batch = q0_goal.repeat(num_samples, 1)
 
         optimizer = optim.LBFGS(
             [waypoints_param],
@@ -455,61 +450,33 @@ def main():
 
         def closure():
             optimizer.zero_grad()
-            # Per-sample losses: shape [num_samples]
-            loss_vec, _ = physics.calculate_total_loss(
-                waypoints_param, q0_start_batch, q0_goal_batch,
+            # Single sample loss
+            total_loss, loss_dict = physics.calculate_total_loss(
+                waypoints_param, q0_start, q0_goal,
                 joint_squared_weight=JOINT_SQUARED_WEIGHT,
                 joint_change_weight=JOINT_CHANGE_WEIGHT,
-                max_joint_weight=MAX_JOINT_WEIGHT,
-                return_mean=False
+                max_joint_weight=MAX_JOINT_WEIGHT
             )
 
-            # Sum over batch → scalar for LBFGS (each sample still has its own gradient)
-            loss = loss_vec.sum()
-            loss.backward()
+            total_loss.backward()
 
             iteration_count[0] += 1
             if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
-                with torch.no_grad():
-                    finite_loss = loss_vec[torch.isfinite(loss_vec)]
-                    if finite_loss.numel() > 0:
-                        print(
-                            f"[GPU][Batched] Iter [{iteration_count[0]}] "
-                            f"mean loss: {finite_loss.mean().item():.6f}, "
-                            f"min loss: {finite_loss.min().item():.6f}, "
-                            f"max loss: {finite_loss.max().item():.6f}"
-                        )
-                    else:
-                        print(f"[GPU][Batched] Iter [{iteration_count[0]}] all losses are non-finite")
+                print(
+                    f"[GPU] Iter [{iteration_count[0]}] "
+                    f"loss: {total_loss.item():.6f}"
+                )
 
-            return loss
+            return total_loss
 
         opt_start = time.time()
         optimizer.step(closure)
         opt_end = time.time()
 
-        # After batched optimization, pick the best sample
+        # Evaluate final loss after optimization
         with torch.no_grad():
-            total_loss_vec, _ = physics.calculate_total_loss(
-                waypoints_param, q0_start_batch, q0_goal_batch,
-                joint_squared_weight=JOINT_SQUARED_WEIGHT,
-                joint_change_weight=JOINT_CHANGE_WEIGHT,
-                max_joint_weight=MAX_JOINT_WEIGHT,
-                return_mean=False
-            )
-
-            # Handle possible inf/nan
-            safe_losses = torch.where(
-                torch.isfinite(total_loss_vec),
-                total_loss_vec,
-                torch.full_like(total_loss_vec, float("inf"))
-            )
-            best_idx = torch.argmin(safe_losses)
-            best_waypoints_param = waypoints_param[best_idx : best_idx + 1].clone()
-
-            # Re-evaluate best sample with full scalar loss dict (no batching)
             total_loss, loss_dict = physics.calculate_total_loss(
-                best_waypoints_param, q0_start, q0_goal,
+                waypoints_param, q0_start, q0_goal,
                 joint_squared_weight=JOINT_SQUARED_WEIGHT,
                 joint_change_weight=JOINT_CHANGE_WEIGHT,
                 max_joint_weight=MAX_JOINT_WEIGHT
@@ -520,8 +487,8 @@ def main():
             max_joint_penalty = loss_dict['max_joint_penalty'].item()
             total_loss_val = loss_dict['total_loss'].item()
 
-            # Quaternion angle error for best sample
-            q_traj_temp, q_dot_traj_temp = physics.generate_trajectory(best_waypoints_param)
+            # Quaternion angle error
+            q_traj_temp, q_dot_traj_temp = physics.generate_trajectory(waypoints_param)
             sim_out_temp = physics.simulate_single(q_traj_temp[0], q_dot_traj_temp[0], q0_start[0], q0_goal[0])
             q_final_temp = sim_out_temp[1]
             q1 = q_final_temp
@@ -530,18 +497,15 @@ def main():
             angle_rad = 2.0 * torch.acos(dot)
             final_deg = angle_rad * 180.0 / math.pi
 
-        # Use best optimized sample going forward
-        waypoints_param = best_waypoints_param
-
         print(f"\nInference Finished (CVAE warm start). Time: {inference_end - inference_start:.4f}s")
-        print(f"Optimization Finished (LBFGS, GPU, batched). Time: {opt_end - opt_start:.4f}s")
+        print(f"Optimization Finished (LBFGS, GPU, best only). Time: {opt_end - opt_start:.4f}s")
         print(
-            f"Best Total Loss: {total_loss_val:.2e} "
+            f"Total Loss: {total_loss_val:.2e} "
             f"(physics: {physics_loss:.2e}, joint_sq: {joint_squared_penalty:.2e}, "
             f"joint_change: {joint_change_penalty:.2e}, max_joint: {max_joint_penalty:.2e})"
         )
-        print(f"Best Angle Error: {final_deg.item():.2e}°")
-        print(f"Final best waypoints (on GPU): {waypoints_param}")
+        print(f"Angle Error: {final_deg.item():.2e}°")
+        print(f"Final waypoints (on GPU): {waypoints_param}")
 
     # 3. 최종 궤적 생성 및 저장 (GPU)
     with torch.no_grad():

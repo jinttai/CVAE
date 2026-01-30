@@ -251,19 +251,11 @@ def generate_data_batch(physics, batch_size, n_q, num_waypoints, joint_min, join
 
 
 def main():
-<<<<<<< HEAD
     parser = argparse.ArgumentParser(description="Generate reachable set data")
     parser.add_argument("--num-samples", type=int, default=100000000,
                         help="Total number of samples to generate (default: 100000000)")
     parser.add_argument("--batch-size", type=int, default=1024,
                         help="Batch size for data generation (default: 1024)")
-=======
-    parser = argparse.ArgumentParser(description="Generate orientation reachable set data")
-    parser.add_argument("--num-samples", type=int, default=10000,
-                        help="Total number of samples to generate (default: 10000)")
-    parser.add_argument("--batch-size", type=int, default=10,
-                        help="Batch size for data generation (default: 10)")
->>>>>>> 85e87c219485efc4935c4f707e896ca38ab4675b
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory for saving data (default: outputs/data)")
     parser.add_argument("--output-name", type=str, default="orientation_reachable_set",

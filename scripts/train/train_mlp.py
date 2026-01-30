@@ -19,12 +19,63 @@ from src.training.physics_layer import PhysicsLayer   # default
 from src.dynamics.urdf2robot_torch import urdf2robot
 
 
+def euler_to_quaternion(roll, pitch, yaw):
+    """
+    Convert Euler angles (roll, pitch, yaw) to quaternion (x, y, z, w)
+    Using ZYX convention (yaw around Z, pitch around Y, roll around X)
+    """
+    # Half angles
+    cr = torch.cos(roll / 2)
+    sr = torch.sin(roll / 2)
+    cp = torch.cos(pitch / 2)
+    sp = torch.sin(pitch / 2)
+    cy = torch.cos(yaw / 2)
+    sy = torch.sin(yaw / 2)
+    
+    # Quaternion components
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+    qw = cr * cp * cy + sr * sp * sy
+    
+    return torch.stack([qx, qy, qz, qw], dim=-1)
+
+
+def generate_random_quaternion_from_euler(batch_size, max_angle_deg=30.0, device='cpu'):
+    """
+    Generate random quaternions from Euler angles within specified range
+    Args:
+        batch_size: Number of quaternions to generate
+        max_angle_deg: Maximum angle in degrees for each Euler angle (default: 10 degrees)
+        device: Device to create tensors on
+    Returns:
+        quaternions: [batch_size, 4] tensor of quaternions (x, y, z, w)
+    """
+    max_angle_rad = math.radians(max_angle_deg)
+    
+    # Generate random Euler angles in [-max_angle_deg, max_angle_deg]
+    # Using torch.rand to generate uniform distribution in [0, 1], then scale to [-max, max]
+    roll = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
+    pitch = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
+    yaw = (2 * max_angle_rad) * torch.rand(batch_size, device=device) - max_angle_rad
+    
+    # Convert to quaternion
+    quaternions = euler_to_quaternion(roll, pitch, yaw)
+    
+    return quaternions
+
+
+# --- 시각화 헬퍼 함수 ---
 def plot_trajectory(q_traj, q_dot_traj, epoch):
-    q_traj = q_traj.detach().cpu().numpy()
+    """
+    생성된 궤적을 Matplotlib 그림으로 변환하여 TensorBoard에 기록
+    """
+    q_traj = q_traj.detach().cpu().numpy()  # [Steps, Joints]
     q_dot_traj = q_dot_traj.detach().cpu().numpy()
 
     fig, axes = plt.subplots(2, 1, figsize=(8, 6))
 
+    # 1. Joint Positions
     for i in range(q_traj.shape[1]):
         axes[0].plot(q_traj[:, i], label=f"J{i+1}")
     axes[0].set_title(f"MLP Joint Angles (Epoch {epoch})")
@@ -32,6 +83,7 @@ def plot_trajectory(q_traj, q_dot_traj, epoch):
     axes[0].grid(True)
     axes[0].legend(loc="right", fontsize="small")
 
+    # 2. Joint Velocities
     for i in range(q_dot_traj.shape[1]):
         axes[1].plot(q_dot_traj[:, i], label=f"J{i+1}")
     axes[1].set_title("MLP Joint Velocities")
@@ -43,36 +95,46 @@ def plot_trajectory(q_traj, q_dot_traj, epoch):
 
 
 def main():
+    # 1. 설정
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"=== MLP (Baseline) Training Start on {device} ===")
 
+    # 로봇 로드 (원본 dynamics 사용)
     urdf_path = os.path.join(ROOT_DIR, "assets/SC_ur10e.urdf")
     robot, _ = urdf2robot(urdf_path, verbose_flag=False, device=device)
 
+    # TensorBoard Writer (로그 디렉토리)
     log_dir = os.path.join(ROOT_DIR, "outputs/logs/mlp_v4")
     writer = SummaryWriter(log_dir=log_dir)
 
+    # ==========================================
+    # [중요] 파라미터 설정 (원본과 동일)
+    # ==========================================
     COND_DIM = 8
     NUM_WAYPOINTS = 3
     OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
 
-    BATCH_SIZE = 1024
+    BATCH_SIZE = 256
     TOTAL_TIME = 10.0
     NUM_EPOCHS = 2000
     
     # Joint regularization weights
     JOINT_SQUARED_WEIGHT = 0.01  # Weight for mean of joint^2 regularization
     JOINT_CHANGE_WEIGHT = 0.01  # Weight for joint change penalty between consecutive waypoints
-    MAX_JOINT_WEIGHT = 0.01  # Weight for maximum joint angle penalty
+    MAX_JOINT_WEIGHT = 0.1  # Weight for maximum joint angle penalty
 
+    # 2. 모델 및 물리 엔진 준비
     model = MLP(COND_DIM, OUTPUT_DIM, joint_limits=robot['joint_limits']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
+    # 시각화용 고정 테스트 셋
     fixed_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device)
-    fixed_goal = torch.tensor([[0.0, 0.0, 0.7071, 0.7071]], device=device)
+    # Generate random quaternions from Euler angles within ±10 degrees
+    fixed_goal = generate_random_quaternion_from_euler(1, max_angle_deg=10.0, device=device)
     fixed_cond = torch.cat([fixed_start, fixed_goal], dim=1)
 
+    # 3. 학습 루프
     total_start_time = time.time()
     epoch_start_time = time.time()
 
@@ -143,11 +205,14 @@ def main():
         )
         epoch_start_time = time.time()
 
+        # --- Validation & Visualization (10 에폭마다) ---
         if (epoch + 1) % 10 == 0:
             with torch.no_grad():
                 wp_vis = model(fixed_cond)
+
                 q_traj, q_dot_traj = physics.generate_trajectory(wp_vis)
                 val_loss = physics.calculate_loss(wp_vis, fixed_start, fixed_goal)
+
                 val_value = val_loss.item()
                 val_losses.append((epoch + 1, val_value))
 
@@ -159,6 +224,7 @@ def main():
 
     print(f"Training Finished. Total Time: {time.time() - total_start_time:.2f}s")
 
+    # === 학습 곡선 저장 (전용 디렉토리) ===
     plots_dir = os.path.join(ROOT_DIR, "outputs/plots")
     if not os.path.exists(plots_dir):
         os.makedirs(plots_dir)
@@ -203,6 +269,7 @@ def main():
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
 
+    # 모델 저장 (전용 디렉토리)
     save_dir = os.path.join(ROOT_DIR, "outputs/weights/mlp_debug")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
