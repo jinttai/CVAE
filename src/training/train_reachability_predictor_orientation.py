@@ -273,13 +273,18 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--num-layers", type=int, default=5)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="DataLoader workers (default: 0 on Windows, 4 elsewhere)")
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument("--val-split", type=float, default=0.01)
     parser.add_argument("--fast-mode", action="store_true",
                         help="Use fast dataset (per-sample distance instead of min over all)")
     parser.add_argument("--no-tensorboard", action="store_true")
     args = parser.parse_args()
+    
+    # Windows에서는 num_workers>0 시 워커 크래시로 학습이 끊기는 경우가 있음 → 기본 0
+    if args.num_workers is None:
+        args.num_workers = 0 if os.name == "nt" else 4
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"=== Orientation Reachability Predictor Training on {device} ===")

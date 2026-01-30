@@ -215,13 +215,17 @@ def main():
                         help="Hidden layer dimension (default: 256)")
     parser.add_argument("--num-layers", type=int, default=5,
                         help="Number of hidden layers (default: 5)")
-    parser.add_argument("--num-workers", type=int, default=4,
-                        help="DataLoader num_workers (default: 4)")
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="DataLoader num_workers (default: 0 on Windows, 4 elsewhere)")
     parser.add_argument("--save-interval", type=int, default=10,
                         help="Checkpoint save interval (default: 10 epochs)")
     parser.add_argument("--no-tensorboard", action="store_true",
                         help="Disable TensorBoard logging")
     args = parser.parse_args()
+    
+    # Windows에서는 num_workers>0 시 워커 크래시로 학습이 끊기는 경우가 있음 → 기본 0
+    if args.num_workers is None:
+        args.num_workers = 0 if os.name == "nt" else 4
     
     # Device 설정
     device = "cuda" if torch.cuda.is_available() else "cpu"

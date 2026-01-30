@@ -79,13 +79,14 @@ def random_quaternion():
     return q
 
 
-def compute_min_distance(query, qfinals):
+def compute_min_distance(query, qfinals, max_compare=None):
     """
     query quaternion과 qfinals 중 가장 가까운 것과의 거리
     
     Args:
         query: [4] tensor (x,y,z,w)
         qfinals: [K, 4] tensor 또는 None
+        max_compare: int 또는 None. None이면 전체 비교. 설정 시 K가 클 때 랜덤 샘플만 비교 (속도 개선)
     
     Returns:
         min_distance: float (0 ~ π)
@@ -93,10 +94,16 @@ def compute_min_distance(query, qfinals):
     if qfinals is None or len(qfinals) == 0:
         return math.pi  # bin이 비어있으면 최대 거리
     
+    K = qfinals.shape[0]
+    if max_compare is not None and K > max_compare:
+        # 빈이 클 때 일부만 샘플링해서 비교 (O(K) → O(max_compare)로 단축)
+        perm = torch.randperm(K, device=qfinals.device)[:max_compare]
+        qfinals = qfinals[perm]
+    
     # 배치 내적 계산
-    dot = torch.abs(torch.sum(query.unsqueeze(0) * qfinals, dim=1))  # [K]
+    dot = torch.abs(torch.sum(query.unsqueeze(0) * qfinals, dim=1))  # [K] or [max_compare]
     dot = dot.clamp(-1, 1)
-    distances = 2 * torch.acos(dot)  # [K]
+    distances = 2 * torch.acos(dot)
     
     return distances.min().item()
 
@@ -111,10 +118,15 @@ class ReachabilityDataset(Dataset):
     
     후반부 (idx >= N): Negative 샘플
         - query = random_quaternion
-        - label = min_distance(query, bin의 모든 q_finals)
+        - label = min_distance(query, bin의 q_finals). bin이 크면 max_bin_compare개만 샘플링 비교 (속도 개선)
     """
     
-    def __init__(self, data_path):
+    def __init__(self, data_path, max_bin_compare=2000):
+        """
+        Args:
+            data_path: reachable_set_binned.pt 경로
+            max_bin_compare: 한 bin에 q_final이 많을 때 최대 몇 개와만 거리 비교할지 (None=전부, 권장 1000~2000)
+        """
         print(f"Loading preprocessed data from: {data_path}")
         data = torch.load(data_path, map_location='cpu')
         
@@ -123,11 +135,13 @@ class ReachabilityDataset(Dataset):
         self.q_final = data['q_final']          # [N, 4]
         self.bin_indices = data['bin_indices']  # [N]
         self.bin_to_qfinals = data['bin_to_qfinals']  # {bin_idx: [K, 4]}
+        self.max_bin_compare = max_bin_compare
         
         self.num_samples = self.start_joint.shape[0]
         
         print(f"Loaded {self.num_samples:,} samples")
         print(f"  Non-empty bins: {len(self.bin_to_qfinals):,}")
+        print(f"  max_bin_compare: {max_bin_compare} (bin당 최대 비교 개수, None=전체)")
     
     def __len__(self):
         return self.num_samples * 2  # positive + negative
@@ -145,10 +159,10 @@ class ReachabilityDataset(Dataset):
             query = self.q_final[real_idx]
             label = torch.tensor(0.0)
         else:
-            # Negative: 랜덤 quaternion, 같은 bin 내 최소 거리
+            # Negative: 랜덤 quaternion, 같은 bin 내 최소 거리 (bin 크면 max_bin_compare개만 샘플링)
             query = random_quaternion()
             qfinals_in_bin = self.bin_to_qfinals.get(bin_idx, None)
-            min_dist = compute_min_distance(query, qfinals_in_bin)
+            min_dist = compute_min_distance(query, qfinals_in_bin, max_compare=self.max_bin_compare)
             label = torch.tensor(min_dist, dtype=torch.float32)
         
         # 입력 concatenate
@@ -217,12 +231,22 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--num-layers", type=int, default=5)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="DataLoader workers (default: 0 on Windows, 4 elsewhere; 0=no multiprocessing)")
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument("--val-split", type=float, default=0.01,
                         help="Validation split ratio (default: 0.01 = 1%)")
+    parser.add_argument("--max-bin-compare", type=int, default=2000,
+                        help="Bin당 최대 비교 개수 (bin이 클 때 속도 개선, 0=전체 비교)")
     parser.add_argument("--no-tensorboard", action="store_true")
     args = parser.parse_args()
+    
+    if args.max_bin_compare == 0:
+        args.max_bin_compare = None  # 전체 비교
+    
+    # Windows에서는 num_workers>0 시 워커 크래시로 학습이 끊기는 경우가 있음 → 기본 0
+    if args.num_workers is None:
+        args.num_workers = 0 if os.name == "nt" else 4
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"=== Reachability Predictor Training (Bin-based) on {device} ===")
@@ -244,7 +268,7 @@ def main():
         print(f"TensorBoard logs: {log_dir}")
     
     # Dataset & DataLoader
-    dataset = ReachabilityDataset(data_path)
+    dataset = ReachabilityDataset(data_path, max_bin_compare=args.max_bin_compare)
     
     # Train/Val split
     val_size = int(args.val_split * len(dataset))
