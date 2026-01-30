@@ -40,7 +40,7 @@ class OrientationReachabilityPredictor(nn.Module):
           입력에서 joint 정보 없이 orientation만 사용
     """
     
-    def __init__(self, input_dim=4, hidden_dim=256, num_layers=5):
+    def __init__(self, input_dim=4, hidden_dim=256, num_layers=3):
         super().__init__()
         
         layers = []
@@ -269,12 +269,17 @@ def main():
     parser.add_argument("--data-path", type=str, default=None,
                         help="Path to orientation_reachable_set.pt")
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-dim", type=int, default=256)
+<<<<<<< HEAD
     parser.add_argument("--num-layers", type=int, default=5)
     parser.add_argument("--num-workers", type=int, default=None,
                         help="DataLoader workers (default: 0 on Windows, 4 elsewhere)")
+=======
+    parser.add_argument("--num-layers", type=int, default=10)
+    parser.add_argument("--num-workers", type=int, default=0)
+>>>>>>> 2e8de1a7a041cd767835745497f1b268c8316fb5
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument("--val-split", type=float, default=0.01)
     parser.add_argument("--fast-mode", action="store_true",
