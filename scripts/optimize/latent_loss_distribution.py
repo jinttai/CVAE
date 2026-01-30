@@ -69,7 +69,7 @@ def load_mlp(weights_path, input_dim, output_dim, device, joint_limits):
 
 def main():
     parser = argparse.ArgumentParser(description="Latent loss distribution (start/final joint = 0)")
-    parser.add_argument("--num-samples", type=int, default=1024, help="Batch size for CVAE sampling")
+    parser.add_argument("--num-samples", type=int, default=2048, help="Batch size for CVAE sampling")
     parser.add_argument("--out-dir", type=str, default=None, help="Output directory (default: outputs/results/latent_loss_dist)")
     args = parser.parse_args()
 
