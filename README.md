@@ -1,10 +1,23 @@
-# Space Robot Planning with CVAE and MLP
+# Space Robot Planning with ConditionalDecoder and MLP
 
-로봇 궤적 계획을 위한 Conditional Variational Autoencoder (CVAE) 및 Multi-Layer Perceptron (MLP) 기반 학습 시스템입니다.
+로봇 궤적 계획을 위한 Conditional Decoder 및 Multi-Layer Perceptron (MLP) 기반 학습 시스템입니다.
 
 ## 개요
 
-이 프로젝트는 우주 로봇의 자세 제어를 위한 궤적 생성 모델을 학습합니다. CVAE와 MLP 두 가지 모델을 사용하여 고정된 시작점에서 다양한 목표 자세로의 궤적을 생성하며, 물리 시뮬레이션을 통한 손실 함수를 사용합니다.
+이 프로젝트는 우주 로봇의 자세 제어를 위한 궤적 생성 모델을 학습합니다. ConditionalDecoder와 MLP 두 가지 모델을 사용하여 고정된 시작점에서 다양한 목표 자세로의 궤적을 생성하며, 물리 시뮬레이션을 통한 손실 함수를 사용합니다.
+
+## 설치
+
+```bash
+# 의존성 설치
+pip install -e .
+
+# 또는 requirements.txt 사용
+pip install -r requirements.txt
+
+# 개발 의존성 (테스트, 린터 등)
+pip install -e ".[dev]"
+```
 
 ---
 
@@ -12,15 +25,17 @@
 
 ### 모델 아키텍처
 
-#### CVAE (Conditional Variational Autoencoder)
+#### ConditionalDecoder (Latent-Conditioned Generator)
 - **목적**: 조건부 확률적 궤적 생성
 - **입력**: Condition (Start(4) + Goal(4) = 8차원)
-- **Latent Dimension**: 8
+- **Latent Dimension**: 3
 - **Hidden Dimension**: 256
 - **구조**:
-  - Encoder: Condition + Trajectory → (μ, log σ²)
   - Decoder: Condition + Latent z → Waypoints (ResNet-style residual blocks)
+  - Encoder: (학습 시에만 사용, 현재는 physics loss만 사용)
 - **특징**: 랜덤 샘플링을 통한 다양한 궤적 생성 가능
+
+> **Note**: 이전 버전에서는 CVAE로 명명되었으나, 실제로 KL divergence loss 없이 decoder만 학습하므로 ConditionalDecoder로 이름 변경됨. 하위 호환성을 위해 `CVAE` 별칭 유지.
 
 #### MLP (Baseline Model)
 - **목적**: 결정론적 궤적 생성 (Baseline)
