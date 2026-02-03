@@ -54,7 +54,7 @@
 
 ## 학습 프로세스
 
-### CVAE 학습 (`scripts/train/train_cvae.py`)
+### CVAE 학습 (`NN_opt/training/train_cvae.py`)
 
 #### 하이퍼파라미터
 - **Batch Size**: 1024
@@ -90,11 +90,11 @@
 5. 10 epoch마다 고정 목표점에 대한 검증 및 TensorBoard 시각화
 
 #### 저장 파일
-- **모델 가중치**: `outputs/weights/cvae_debug/v5_joint_change.pth` (v5)
-- **학습 곡선 CSV**: `outputs/plots/cvae_training_curve/v4.csv`
+- **모델 가중치**: `NN_opt/weight/cvae_debug/v5_joint_change.pth` (v5)
+- **학습 곡선 CSV**: `NN_opt/plots/cvae_training_curve/v4.csv`
   - 컬럼: `epoch`, `train_loss`, `epoch_duration`, `val_loss`
-- **학습 곡선 이미지**: `outputs/plots/cvae_training_curve/v4.png`
-- **TensorBoard 로그**: `outputs/logs/cvae_v4/`
+- **학습 곡선 이미지**: `NN_opt/plots/cvae_training_curve/v4.png`
+- **TensorBoard 로그**: `NN_opt/logs/cvae_v4/`
 
 #### 손실 함수 (v5)
 - **Physics Loss**: 물리 시뮬레이션 기반 자세 오차 (Chordal distance, log scale)
@@ -119,7 +119,7 @@
 - 변경: 관절 제곱 평균 패널티 + 연속 waypoint 간 변화량 패널티
 - 목적: 더 부드러운 궤적 생성 및 작은 관절 각도 유도
 
-### MLP 학습 (`scripts/train/train_mlp.py`)
+### MLP 학습 (`NN_opt/training/train_mlp.py`)
 
 #### 하이퍼파라미터
 - **Batch Size**: 1024
@@ -142,16 +142,16 @@
 5. 10 epoch마다 고정 목표점에 대한 검증 및 TensorBoard 시각화
 
 #### 저장 파일
-- **모델 가중치**: `outputs/weights/mlp_debug/v4.pth`
-- **학습 곡선 CSV**: `outputs/plots/mlp_training_curve/v4.csv`
-- **학습 곡선 이미지**: `outputs/plots/mlp_training_curve/v4.png`
-- **TensorBoard 로그**: `outputs/logs/mlp_v4/`
+- **모델 가중치**: `NN_opt/weight/mlp_debug/v4.pth`
+- **학습 곡선 CSV**: `NN_opt/plots/mlp_training_curve/v4.csv`
+- **학습 곡선 이미지**: `NN_opt/plots/mlp_training_curve/v4.png`
+- **TensorBoard 로그**: `NN_opt/logs/mlp_v4/`
 
 ---
 
 ## 최적화 프로세스
 
-### CVAE 기반 최적화 (`scripts/optimize/optimize_cvae.py`)
+### CVAE 기반 최적화 (`NN_opt/optimization/optimize_cvae.py`)
 
 #### 단계
 1. **Warm Start (CUDA)**:
@@ -173,7 +173,7 @@
 - 동일한 손실 함수로 학습과 최적화 일관성 유지
 
 #### 저장 파일
-- **궤적 플롯**: `outputs/results/opt_nn_lbfgs/cvae_lbfgs_traj_gpu_opt.png`
+- **궤적 플롯**: `NN_opt/result/opt_nn_lbfgs/cvae_lbfgs_traj_gpu_opt.png`
 - **CSV 파일들**:
   - `q_traj.csv`: Joint position trajectory
   - `q_dot_traj.csv`: Joint velocity trajectory
@@ -182,7 +182,7 @@
   - `q0_start.csv`, `q0_goal.csv`: 시작/목표 쿼터니언
   - `meta.csv`: 메타 정보 (dt, total_time)
 
-### MLP 기반 최적화 (`scripts/optimize/optimize_mlp.py`)
+### MLP 기반 최적화 (`NN_opt/optimization/optimize_mlp.py`)
 
 #### 단계
 1. **Warm Start (CUDA/CPU)**:
@@ -198,10 +198,10 @@
 - 더 빠른 inference (샘플링 불필요)
 
 #### 저장 파일
-- **궤적 플롯**: `outputs/results/opt_nn_lbfgs/mlp_lbfgs_traj.png`
+- **궤적 플롯**: `NN_opt/result/opt_nn_lbfgs/mlp_lbfgs_traj.png`
 - **CSV 파일들**: CVAE와 동일한 구조 (`*_mlp.csv` 접미사)
 
-### 직접 최적화 (`scripts/optimize/optimize_direct.py`)
+### 직접 최적화 (`NN_opt/optimization/optimize_direct.py`)
 
 #### 방법
 - 랜덤 초기화된 waypoints에서 시작
@@ -229,36 +229,42 @@ pip install -r requirements.txt
 
 ```bash
 # CVAE 학습
-cd scripts/train
-python train_cvae.py
+python -m NN_opt.training.train_cvae
 
 # MLP 학습
-python train_mlp.py
+python -m NN_opt.training.train_mlp
+
+# Joint-space CVAE 학습
+python -m NN_opt.training.train_cvae_joint
+
+# Joint-space MLP 학습
+python -m NN_opt.training.train_mlp_joint
 ```
 
 ### 최적화 실행
 
 ```bash
-cd scripts/optimize
-
 # CVAE 기반 최적화
-python optimize_cvae.py
+python -m NN_opt.optimization.optimize_cvae
 
 # MLP 기반 최적화
-python optimize_mlp.py
+python -m NN_opt.optimization.optimize_mlp
 
 # 직접 최적화 (랜덤 초기화)
-python optimize_direct.py
+python -m NN_opt.optimization.optimize_direct
+
+# iLQR/DDP 최적화
+python -m ilqr.scripts.run_ddp_casadi
 ```
 
 ### TensorBoard 실행
 
 ```bash
 # CVAE 학습 곡선 확인
-tensorboard --logdir outputs/logs/cvae_v4
+tensorboard --logdir NN_opt/logs/cvae_v4
 
 # MLP 학습 곡선 확인
-tensorboard --logdir outputs/logs/mlp_v4
+tensorboard --logdir NN_opt/logs/mlp_v4
 ```
 
 ---
@@ -311,26 +317,55 @@ tensorboard --logdir outputs/logs/mlp_v4
 
 ```
 CVAE/
-├── src/
-│   ├── models/
-│   │   └── cvae.py          # CVAE 및 MLP 모델 정의
-│   ├── training/
-│   │   └── physics_layer.py # 물리 시뮬레이션 레이어
-│   └── dynamics/            # SPART 동역학 모듈
-├── scripts/
-│   ├── train/
-│   │   ├── train_cvae.py    # CVAE 학습 스크립트
-│   │   └── train_mlp.py     # MLP 학습 스크립트
-│   └── optimize/
-│       ├── optimize_cvae.py # CVAE 기반 최적화
-│       ├── optimize_mlp.py  # MLP 기반 최적화
-│       └── optimize_direct.py # 직접 최적화
-├── outputs/
-│   ├── weights/             # 학습된 모델 가중치
-│   ├── plots/               # 학습 곡선 플롯
-│   ├── logs/                # TensorBoard 로그
-│   └── results/             # 최적화 결과 (CSV, 플롯)
-└── assets/                  # URDF 파일 및 메시
+├── assets/                      # URDF 파일 및 메시
+│   ├── meshes/                  # UR10e 로봇 메시
+│   ├── a1_description/          # A1 쿼드러펫 로봇
+│   └── SC_ur10e.urdf            # 우주 로봇 URDF
+│
+├── physics/                     # 물리 시뮬레이션 모듈
+│   ├── utils.py                 # 공통 유틸리티 (quaternion, rotation 등)
+│   └── dynamics/                # SPART 동역학 모듈
+│       ├── spart_functions.py   # SPART 함수 (NumPy)
+│       ├── spart_functions_torch.py  # SPART 함수 (PyTorch)
+│       ├── spart_casadi.py      # SPART 함수 (CasADi)
+│       └── urdf2robot*.py       # URDF 파서
+│
+├── ilqr/                        # iLQR/DDP 최적화 모듈
+│   ├── scripts/
+│   │   └── run_ddp_casadi.py    # DDP 실행 스크립트
+│   └── src/
+│       ├── ddp_casadi.py        # CasADi 기반 DDP 구현
+│       └── trajectory_utils.py  # 궤적 유틸리티
+│
+├── NN_opt/                      # 신경망 기반 최적화 모듈
+│   ├── model/                   # 신경망 모델 정의
+│   │   ├── cvae.py              # CVAE 및 MLP 모델
+│   │   ├── spline.py            # 스플라인 궤적 생성
+│   │   └── reachability_predictor.py
+│   ├── training/                # 학습 스크립트 및 유틸리티
+│   │   ├── physics_layer.py     # 물리 시뮬레이션 레이어
+│   │   ├── train_cvae.py        # CVAE 학습
+│   │   ├── train_mlp.py         # MLP 학습
+│   │   ├── train_cvae_joint.py  # Joint-space CVAE 학습
+│   │   └── train_mlp_joint.py   # Joint-space MLP 학습
+│   ├── optimization/            # 최적화 스크립트
+│   │   ├── optimize_cvae.py     # CVAE 기반 최적화
+│   │   ├── optimize_mlp.py      # MLP 기반 최적화
+│   │   ├── optimize_direct.py   # 직접 최적화
+│   │   └── optimize_pso.py      # PSO 최적화
+│   ├── utils/                   # 유틸리티 함수
+│   │   ├── data_generation.py   # 데이터 생성
+│   │   ├── losses.py            # 손실 함수
+│   │   └── visualization.py     # 시각화
+│   ├── weight/                  # 학습된 모델 가중치
+│   ├── result/                  # 최적화 결과 (CSV, 플롯)
+│   ├── logs/                    # TensorBoard 로그
+│   └── plots/                   # 학습 곡선 플롯
+│
+├── mujoco_sim.py                # MuJoCo 시뮬레이션
+├── test.py                      # 테스트 스크립트
+├── requirements.txt             # Python 의존성
+└── README.md                    # 이 파일
 ```
 
 ---
@@ -418,8 +453,8 @@ total_loss = physics_loss + joint_squared_penalty + joint_change_penalty
 - **학습 및 최적화 간 손실 함수 일관성 유지**
 
 **파일명**:
-- 모델 가중치: `outputs/weights/cvae_debug/v5_joint_change.pth`
-- 최적화 결과: `outputs/results/opt_nn_lbfgs/cvae_lbfgs_traj_gpu_opt.png`
+- 모델 가중치: `NN_opt/weight/cvae_debug/v5_joint_change.pth`
+- 최적화 결과: `NN_opt/result/opt_nn_lbfgs/cvae_lbfgs_traj_gpu_opt.png`
 
 ### v4 (이전 버전)
 - 최대 관절 각도 패널티 사용 (`MAX_JOINT_WEIGHT`)
