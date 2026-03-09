@@ -17,14 +17,15 @@ ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../.."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from ddp_acc.src.ddp_casadi import (
+from ddp.src.ddp_casadi import (
     load_robot_from_urdf,
     CasadiSpaceRobotDynamics,
     CasadiRunningCost,
     CasadiTerminalCost,
     CasadiDDP,
 )
-from ddp_acc.src.trajectory_utils import save_trajectory_csv
+from ddp.src.trajectory_utils import save_trajectory_csv
+from scenario import SCENARIO, get_goal_quaternion, get_initial_state
 
 
 def euler_to_quaternion(roll, pitch, yaw):
@@ -102,73 +103,61 @@ def geodesic_distance_so3(R1, R2):
 
 def main():
     root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    urdf_path = os.path.join(root_dir, "assets","SC_ur10e.urdf")
+    urdf_path = os.path.join(root_dir, SCENARIO["urdf"])
 
     robot = load_robot_from_urdf(urdf_path)
     n_q = robot["n_q"]
-    # New state dim: q(n_q) + qd(n_q) + q_base(4)
     n_x = 2 * n_q + 4
 
-    # Time horizon
-    T = 100
-    dt = 0.1
-    total_time = T * dt
+    # Time horizon (from scenario)
+    T = SCENARIO["T"]
+    dt = SCENARIO["dt"]
+    total_time = SCENARIO["total_time"]
 
     print(f"Time horizon: {total_time}s ({T} steps, dt={dt}s)")
 
     # Dynamics
     dyn = CasadiSpaceRobotDynamics(robot)
 
-    # Initial state: joints zero, joint vels zero, base identity quaternion
-    q0 = np.zeros(n_q)
-    qd0 = np.zeros(n_q)
-    q_base0 = np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
-    x0 = np.concatenate([q0, qd0, q_base0])
+    # Initial state & goal (from scenario)
+    x0 = get_initial_state()
+    q_goal = get_goal_quaternion()
+    goal_joints = np.array(SCENARIO["goal_joints"])
 
-    # Goal orientation & joints
-    roll_deg, pitch_deg, yaw_deg = 150.0, 150.0, -15.0
-    roll = np.deg2rad(roll_deg)
-    pitch = np.deg2rad(pitch_deg)
-    yaw = np.deg2rad(yaw_deg)
-    q_goal = euler_to_quaternion(roll, pitch, yaw)
-    goal_joints = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-
+    roll_deg, pitch_deg, yaw_deg = SCENARIO["goal_euler_deg"]
     print(f"Initial orientation: Identity")
-    print(f"Goal orientation: Roll={roll_deg}°, Pitch={pitch_deg}°, Yaw={yaw_deg}°")
+    print(f"Goal orientation: Roll={roll_deg}, Pitch={pitch_deg}, Yaw={yaw_deg}")
 
-    # Costs
-    # R_weight applies to control input u (acceleration)
-    # Extract joint limits from robot model (if available)
-    # The urdf2robot parser provides limits in radians (default URDF standard)
+    # Joint limits from URDF
     joint_limits = None
     if 'joints' in robot:
-        # Filter only moving joints (q_id != -1) and sort by q_id
         moving_joints = [j for j in robot['joints'] if j['q_id'] != -1]
         moving_joints.sort(key=lambda x: x['q_id'])
-        
         if len(moving_joints) == n_q:
             jl_lower = np.array([j['limit']['lower'] for j in moving_joints])
             jl_upper = np.array([j['limit']['upper'] for j in moving_joints])
             joint_limits = (jl_lower, jl_upper)
-            print("Joint limits loaded from URDF (rad):")
+            print(f"Joint limits loaded from URDF (rad):")
             print(f"  Lower: {jl_lower}")
             print(f"  Upper: {jl_upper}")
-            
+
+    # Running cost (from scenario)
     running_cost = CasadiRunningCost(
-        R_weight=0.01, 
-        n_u=n_q, 
+        R_weight=SCENARIO["R_weight"],
+        n_u=n_q,
         joint_limits=joint_limits,
-        mu_init=1.0,        # Initial ALM penalty parameter
-        lambda_init=0.0,    # Initial Lagrange multipliers
+        mu_init=1.0,
+        lambda_init=0.0,
     )
-    
-    # Terminal cost
+
+    # Terminal cost (from scenario)
     terminal_cost = CasadiTerminalCost(
         goal_quaternion=q_goal,
         goal_joints=goal_joints,
-        orientation_weight=20.0,
-        joint_weight=1.0,
-        joint_vel_weight=1.0, # Penalizes terminal joint velocity (qd -> 0)
+        orientation_weight=SCENARIO["orientation_weight"],
+        joint_weight=SCENARIO["joint_weight"],
+        joint_vel_weight=SCENARIO["joint_vel_weight"],
+        vel_idx11_weight=SCENARIO["vel_idx11_weight"],
         n_u=n_q,
     )
 
@@ -237,7 +226,7 @@ def main():
     joint_err_norm = np.linalg.norm(final_joints - goal_joints)
 
     print(f"\nFinal orientation error: {orient_err_deg:.2f}°")
-    print(f"Final joint error: {joint_err_norm:.4f} rad")
+    print(f"Final joint position error (||q_final - q_goal||): {joint_err_norm:.4f} rad")
 
     # --- Save Results ---
     results_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "results")
@@ -272,31 +261,22 @@ def main():
     # 3. Combined Orientation and Joint Plot (2x2)
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
-    # [0,0] Orientation (Quaternion)
-    # quaternion components (x, y, z, w)
-    quaternions = X_opt[:, 2*n_q:]
-    
-    axes[0, 0].plot(time_steps, quaternions)
-    axes[0, 0].set_ylabel('Quaternion')
-    axes[0, 0].set_title('Base Orientation (Quaternion)')
+    # [0,0] Base orientation as Euler angles (deg) with target
+    euler_traj = np.array([quat_to_euler(X_opt[t, 2*n_q:] / (np.linalg.norm(X_opt[t, 2*n_q:]) + 1e-8))
+                          for t in range(T + 1)])
+    euler_deg = np.rad2deg(euler_traj)
+    axes[0, 0].plot(time_steps, euler_deg[:, 0], label='Roll')
+    axes[0, 0].plot(time_steps, euler_deg[:, 1], label='Pitch')
+    axes[0, 0].plot(time_steps, euler_deg[:, 2], label='Yaw')
+    # Target orientation (constant)
+    target_euler_deg = np.rad2deg(quat_to_euler(q_goal))
+    axes[0, 0].axhline(y=target_euler_deg[0], color='C0', linestyle='--', alpha=0.6, linewidth=1)
+    axes[0, 0].axhline(y=target_euler_deg[1], color='C1', linestyle='--', alpha=0.6, linewidth=1)
+    axes[0, 0].axhline(y=target_euler_deg[2], color='C2', linestyle='--', alpha=0.6, linewidth=1)
+    axes[0, 0].set_ylabel('Euler Angle (deg)')
+    axes[0, 0].set_title('Base Orientation (Euler: Roll, Pitch, Yaw) — dashed = target')
     axes[0, 0].grid(True, alpha=0.3)
-    axes[0, 0].legend(['qx', 'qy', 'qz', 'qw'])
-    
-    # Goal lines for quaternion
-    # q_goal is [x, y, z, w]
-    # Check if final quaternion is flipped relative to goal.
-    # If dot(q_final, q_goal) < 0, they are in opposite hemispheres.
-    # For visualization, we flip q_goal to match q_final's hemisphere.
-    final_q = quaternions[-1]
-    if np.dot(final_q, q_goal) < 0:
-        q_goal_plot = -q_goal
-        print("Note: Goal quaternion flipped for visualization to match final state hemisphere.")
-    else:
-        q_goal_plot = q_goal
-
-    q_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
-    for i in range(4):
-        axes[0, 0].axhline(y=q_goal_plot[i], color=q_colors[i], linestyle='--', alpha=0.5)
+    axes[0, 0].legend(loc='upper right', fontsize='small')
 
     # [0,1] Orientation Error
     errors = []

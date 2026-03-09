@@ -3,10 +3,11 @@ import os
 import numpy as np
 import mujoco
 
-# Add src to sys.path to import spart
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-from dynamics.urdf2robot import urdf2robot
-import dynamics.spart_functions as ft
+# Add project root to sys.path
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.append(ROOT_DIR)
+from src.dynamics.urdf2robot import urdf2robot
+import src.dynamics.spart_functions as ft
 
 def dcm_to_quat(R):
     """
@@ -55,15 +56,15 @@ def test_kinematics():
     print("========================================")
 
     # 1. Load XML
-    xml_path = 'assets/spacerobot_cjt.xml'
+    xml_path = os.path.join(ROOT_DIR, 'assets/spacerobot_cjt.xml')
     model = mujoco.MjModel.from_xml_path(xml_path)
 
     # 2. Load URDF
-    urdf_path = 'assets/SC_ur10e.urdf'
+    urdf_path = os.path.join(ROOT_DIR, 'assets/SC_ur10e.urdf')
     try:
         robot, _ = urdf2robot(urdf_path)
     except:
-        urdf_path = 'src/dynamics/assets/SC_ur10e.urdf'
+        urdf_path = os.path.join(ROOT_DIR, 'src/dynamics/assets/SC_ur10e.urdf')
         robot, _ = urdf2robot(urdf_path)
 
     print(f"{'Joint Name':<25} | {'Param':<10} | {'MuJoCo':<25} | {'Spart/URDF':<25} | {'Diff':<10}")
@@ -171,19 +172,19 @@ def test_robot_properties():
     print("========================================")
 
     # 1. Load XML
-    xml_path = 'assets/spacerobot_cjt.xml'
+    xml_path = os.path.join(ROOT_DIR, 'assets/spacerobot_cjt.xml')
     model = mujoco.MjModel.from_xml_path(xml_path)
     print(f"Loaded MuJoCo model from {xml_path}")
 
     # 2. Load URDF
-    urdf_path = 'assets/SC_ur10e.urdf' # Assuming this is the correct URDF
+    urdf_path = os.path.join(ROOT_DIR, 'assets/SC_ur10e.urdf') # Assuming this is the correct URDF
     try:
         # urdf2robot might need relative path or absolute
         robot, _ = urdf2robot(urdf_path)
         print(f"Loaded URDF robot from {urdf_path}")
     except Exception as e:
         # Fallback to src/dynamics/assets if not found
-        urdf_path = 'src/dynamics/assets/SC_ur10e.urdf'
+        urdf_path = os.path.join(ROOT_DIR, 'src/dynamics/assets/SC_ur10e.urdf')
         robot, _ = urdf2robot(urdf_path)
         print(f"Loaded URDF robot from {urdf_path}")
 
@@ -231,15 +232,15 @@ def test_dynamics():
     print("========================================")
 
     # 1. Setup Models
-    xml_path = 'assets/spacerobot_cjt.xml'
+    xml_path = os.path.join(ROOT_DIR, 'assets/spacerobot_cjt.xml')
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
 
-    urdf_path = 'assets/SC_ur10e.urdf'
+    urdf_path = os.path.join(ROOT_DIR, 'assets/SC_ur10e.urdf')
     try:
         robot, _ = urdf2robot(urdf_path)
     except:
-        urdf_path = 'src/dynamics/assets/SC_ur10e.urdf'
+        urdf_path = os.path.join(ROOT_DIR, 'src/dynamics/assets/SC_ur10e.urdf')
         robot, _ = urdf2robot(urdf_path)
 
     n_q_joints = robot['n_q']

@@ -159,6 +159,55 @@ class CasadiSpaceRobotDynamics:
         x_next = ca.vertcat(q_joints_next, qd_joints_next, q_base_next)
         return x_next
 
+    def _build_inverse_dynamics(self):
+        """
+        Build CasADi function for joint torques: tau = inverse_dynamics(q, qd, qdd).
+        EOM: [H0 H0m; H0m' Hm]*[u0_dot; qdd] + [C0 C0m; Cm0 Cm]*[u0; qd] = [0; tau].
+        Base unactuated => u0_dot = -H0^{-1}*(H0m*qdd + C0*u0 + C0m*qd), u0 = -H0^{-1}*H0m*qd.
+        """
+        n_q = self.n_q
+        q_joints = ca.SX.sym("q", n_q)
+        qd_joints = ca.SX.sym("qd", n_q)
+        qdd_joints = ca.SX.sym("qdd", n_q)
+
+        RJ, RL, rJ, rL, e, g = spart.kinematics(self.R0, self.r0, q_joints, self.robot)
+        Bij, Bi0, P0, pm = spart.diff_kinematics(self.R0, self.r0, rL, e, g, self.robot)
+        I0, Im = spart.inertia_projection(self.R0, RL, self.robot)
+        M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, self.robot)
+        H0, H0m, Hm = spart.generalized_inertia_matrix(
+            M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot
+        )
+
+        # Base velocity from momentum conservation: H0*u0 + H0m*qd = 0
+        u0 = ca.solve(H0, -H0m @ qd_joints)
+
+        t0, tL = spart.velocities(Bij, Bi0, P0, pm, u0, qd_joints, self.robot)
+        C0, C0m, Cm0, Cm = spart.convective_inertia_matrix(
+            t0, tL, I0, Im, M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot
+        )
+
+        # u0_dot from base row: H0*u0_dot + H0m*qdd + C0*u0 + C0m*qd = 0
+        u0_dot = ca.solve(H0, -(H0m @ qdd_joints + C0 @ u0 + C0m @ qd_joints))
+
+        # Joint torques: H0m'*u0_dot + Hm*qdd + Cm0*u0 + Cm*qd = tau
+        tau = H0m.T @ u0_dot + Hm @ qdd_joints + Cm0 @ u0 + Cm @ qd_joints
+
+        self.tau_fun = ca.Function(
+            "inverse_dynamics", [q_joints, qd_joints, qdd_joints], [tau]
+        )
+
+    def compute_torque(self, q: np.ndarray, qd: np.ndarray, qdd: np.ndarray) -> np.ndarray:
+        """
+        Compute joint torques (inverse dynamics) at (q, qd, qdd).
+        Returns tau of shape (n_q,).
+        """
+        if not hasattr(self, "tau_fun") or self.tau_fun is None:
+            self._build_inverse_dynamics()
+        q = np.asarray(q, dtype=float).reshape(-1)
+        qd = np.asarray(qd, dtype=float).reshape(-1)
+        qdd = np.asarray(qdd, dtype=float).reshape(-1)
+        return np.array(self.tau_fun(q, qd, qdd)).flatten()
+
     def rollout(self, x0: np.ndarray, U: np.ndarray, dt: float) -> np.ndarray:
         """
         Rollout trajectory given an initial state and control sequence.
@@ -404,11 +453,10 @@ class CasadiRunningCost:
 class CasadiTerminalCost:
     """
     Terminal cost:
-        L_T(x) = w_orient * ||log(R(x)ᵀ R_goal)||² + w_joint * ||q - q_goal||² + w_velocity * ||u||²
-    
-    Note: 'velocity_weight' here applies to the control input 'u', which is now acceleration.
-    Ideally we should also penalize terminal joint velocity (which is in state).
-    But preserving structure for now.
+        L_T(x) = w_orient * (3 - trace(Rᵀ R_goal))  [base orientation SO3]
+              + w_joint * ||q - q_goal||²           [arm joint angles]
+              + w_joint_vel * ||qd||²               [arm joint velocity]
+              + w_vel_idx11 * x[11]²                [특정 성분 강화: base linear vel index 11]
     """
 
     def __init__(
@@ -418,6 +466,7 @@ class CasadiTerminalCost:
         orientation_weight: float = 1.0,
         joint_weight: float = 0.0,
         joint_vel_weight: float = 0.0,
+        vel_idx11_weight: float = 0.0,
         n_u: int = 6,
     ):
         self.n_u = n_u
@@ -436,6 +485,7 @@ class CasadiTerminalCost:
         self.orientation_weight = float(orientation_weight)
         self.joint_weight = float(joint_weight)
         self.joint_vel_weight = float(joint_vel_weight)
+        self.vel_idx11_weight = float(vel_idx11_weight)
 
         x = ca.SX.sym("x", self.n_x)
         u = ca.SX.sym("u", self.n_u)
@@ -451,25 +501,25 @@ class CasadiTerminalCost:
         R_current = spart.quat_dcm(q_base)
         R_goal = spart.quat_dcm(self.goal_quat)
 
-        R_rel = R_current.T @ R_goal
-        trace_R = ca.trace(R_rel)
-        
-        # Use simple trace cost: 1 - trace(R_rel)/3? Or just 3 - trace.
-        # Max trace is 3. Min trace is -1.
-        # Cost = w * (3 - trace(R_rel))  -> ranges from 0 to 4*w
-        
-        orient_cost = self.orientation_weight * (3.0 - trace_R)
+        # SO(3) orientation error (same as src: log(eps + 0.5*trace((R-Rg)^T(R-Rg))))
+        R_diff = R_current - R_goal
+        trace_val = 0.5 * ca.trace(R_diff.T @ R_diff)
+        orient_cost = self.orientation_weight * ca.log(1e-8 + trace_val)
 
         joint_cost = 0
         if self.has_joint_goal:
             dq = q - q_goal
             joint_cost = self.joint_weight * ca.dot(dq, dq)
-            
+
         joint_vel_cost = 0
         if self.joint_vel_weight > 0:
             joint_vel_cost = self.joint_vel_weight * ca.dot(qd, qd)
 
-        L = orient_cost + joint_cost + joint_vel_cost
+        vel_idx11_cost = 0
+        if self.vel_idx11_weight > 0:
+            vel_idx11_cost = self.vel_idx11_weight * x[11] ** 2
+
+        L = orient_cost + joint_cost + joint_vel_cost + vel_idx11_cost
 
         self.LT_fun = ca.Function("L_terminal", [x, u], [L])
         
@@ -477,6 +527,7 @@ class CasadiTerminalCost:
         self.orient_cost_fun = ca.Function("L_orient", [x], [orient_cost])
         self.joint_cost_fun = ca.Function("L_joint", [x], [joint_cost])
         self.joint_vel_cost_fun = ca.Function("L_joint_vel", [x], [joint_vel_cost])
+        self.vel_idx11_cost_fun = ca.Function("L_vel_idx11", [x], [vel_idx11_cost])
         
         Lx = ca.gradient(L, x)
         Lxx = ca.hessian(L, x)[0]
@@ -495,10 +546,12 @@ class CasadiTerminalCost:
         c_orient = float(self.orient_cost_fun(x))
         c_joint = float(self.joint_cost_fun(x))
         c_joint_vel = float(self.joint_vel_cost_fun(x))
+        c_vel_idx11 = float(self.vel_idx11_cost_fun(x))
         return {
             "orientation": c_orient,
             "joint_pos": c_joint,
-            "joint_vel": c_joint_vel
+            "joint_vel": c_joint_vel,
+            "vel_idx11": c_vel_idx11,
         }
 
     def derivatives(self, x: np.ndarray):
@@ -647,7 +700,9 @@ class CasadiDDP:
         # Initial terminal cost breakdown
         term_comps = self.terminal_cost.get_cost_components(X[-1])
         print(f"      Initial Terminal Costs -> Orient: {term_comps['orientation']:.4f}, "
-              f"JointPos: {term_comps['joint_pos']:.4f}, JointVel: {term_comps['joint_vel']:.4f}")
+              f"JointPos(||q-q_goal||²): {term_comps['joint_pos']:.4f}, "
+              f"JointVel(||qd||²→0): {term_comps['joint_vel']:.4f}, "
+              f"VelIdx11: {term_comps['vel_idx11']:.4f}")
         
         # Initial constraint violation
         viol_info = self.running_cost.get_constraint_violations(X)
@@ -704,7 +759,9 @@ class CasadiDDP:
         # Final terminal cost breakdown
         term_comps = self.terminal_cost.get_cost_components(X[-1])
         print(f"\nFinal Terminal Costs -> Orient: {term_comps['orientation']:.4f}, "
-              f"JointPos: {term_comps['joint_pos']:.4f}, JointVel: {term_comps['joint_vel']:.4f}")
+              f"JointPos(||q-q_goal||²): {term_comps['joint_pos']:.4f}, "
+              f"JointVel(||qd||²→0): {term_comps['joint_vel']:.4f}, "
+              f"VelIdx11: {term_comps['vel_idx11']:.4f}")
         
         # Final constraint violation
         viol_info = self.running_cost.get_constraint_violations(X)

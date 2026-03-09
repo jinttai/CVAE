@@ -7,11 +7,12 @@ import sys
 import os
 import matplotlib.pyplot as plt
 
-# Add src to sys.path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+# Add project root to sys.path
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.append(ROOT_DIR)
 # We might need spart for accurate base velocity reconstruction if simple diff is not enough
-import dynamics.spart_functions as ft
-from dynamics.urdf2robot import urdf2robot
+from src.dynamics import spart_functions as ft
+from src.dynamics.urdf2robot import urdf2robot
 
 def get_quaternion_derivative(q, q_next, dt):
     """
@@ -61,7 +62,7 @@ def get_quaternion_derivative(q, q_next, dt):
 
 def run_simulation():
     # 1. Load Model
-    xml_path = 'assets/spacerobot_cjt.xml'
+    xml_path = os.path.join(ROOT_DIR, 'assets/spacerobot_cjt.xml')
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
     
@@ -69,7 +70,7 @@ def run_simulation():
     data_ref = mujoco.MjData(model)
     
     # 2. Load Trajectory
-    csv_path = 'ddp_acc/results/trajectory_casadi_ilqr.csv' # Fixed path from ddp_acc to ddp
+    csv_path = os.path.join(ROOT_DIR, 'ddp/results/trajectory_casadi_ilqr.csv') # Fixed path from ddp_acc to ddp
     if not os.path.exists(csv_path):
         print(f"Error: Trajectory file {csv_path} not found.")
         return
