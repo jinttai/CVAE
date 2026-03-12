@@ -233,43 +233,14 @@ def plot_trajectory(q_traj, q_dot_traj, euler_traj, title, save_path, total_time
     print(f"Saved plot to {save_path}")
 
 
-def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"=== Random Initialization + LBFGS Start on {device} ===")
-
-    robot, _ = urdf2robot(os.path.join(ROOT_DIR, "assets/SC_ur10e.urdf"), verbose_flag=False, device=device)
-
-    # 파라미터 (원본 프로젝트 구조와 동일하게 정리)
-    COND_DIM = 8
-    NUM_WAYPOINTS = 3
-    OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
-    LATENT_DIM = 8
-    TOTAL_TIME = 10.0  # 10초 trajectory
-    MAX_JOINT_WEIGHT = 0.01  # Weight for maximum joint angle regularization (same as training)
-
-    physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
-
-    save_dir = os.path.join(ROOT_DIR, "outputs/results/opt_nn_lbfgs")
-    os.makedirs(save_dir, exist_ok=True)
-
-    q0_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
-    # Fixed desired orientation: roll=15deg, pitch=15deg, yaw=-15deg (within angle limits)
-    roll_deg, pitch_deg, yaw_deg = np.random.randint(0, 40), np.random.randint(0, 40), np.random.randint(0, 40)
-    roll_rad = math.radians(roll_deg)
-    pitch_rad = math.radians(pitch_deg)
-    yaw_rad = math.radians(yaw_deg)
-    q0_goal = euler_to_quaternion(
-        torch.tensor([roll_rad], device=device),
-        torch.tensor([pitch_rad], device=device),
-        torch.tensor([yaw_rad], device=device),
-    )
-    condition = torch.cat([q0_start, q0_goal], dim=1)
-
-
-    # 1. LBFGS Refinement (zero initial guess 사용)
-    waypoints_param = torch.randn(1, OUTPUT_DIM, device=device, dtype=torch.float32)
-    waypoints_param.requires_grad = True
-    print(f"Initial waypoints: {waypoints_param}")
+def run_single_optimization(physics, waypoints_init, q0_start, q0_goal, robot,
+                             NUM_WAYPOINTS, MAX_JOINT_WEIGHT, label, verbose=False):
+    """
+    Run LBFGS optimization from a given initial waypoint guess.
+    Returns dict with loss_history, final_loss, angle_error, time, waypoints.
+    """
+    device = waypoints_init.device
+    waypoints_param = waypoints_init.clone().detach().requires_grad_(True)
 
     optimizer = optim.LBFGS(
         [waypoints_param],
@@ -285,188 +256,258 @@ def main():
     def closure():
         optimizer.zero_grad()
         physics_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal)
-        
-        # Maximum joint angle penalty (same as training)
         waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
-        max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0]  # [1]
-        max_joint_penalty = max_joint_angle.mean()  # Scalar
-        
-        # Combined loss (same as training)
+        max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0]
+        max_joint_penalty = max_joint_angle.mean()
         loss = physics_loss + MAX_JOINT_WEIGHT * max_joint_penalty
-        
         loss.backward()
-        loss_value = loss.item()
-        loss_history.append(loss_value)
+        loss_history.append(loss.item())
         iteration_count[0] += 1
-
-        if iteration_count[0] <= 20 or iteration_count[0] % 10 == 0:
-            print(f"[Iter] Iter [{iteration_count[0]}] Loss: {loss_value:.6f} (physics: {physics_loss.item():.6f}, joint_penalty: {max_joint_penalty.item():.6f})")
-
+        if verbose and (iteration_count[0] <= 10 or iteration_count[0] % 10 == 0):
+            print(f"  [{label}] Iter {iteration_count[0]:3d}  Loss: {loss.item():.6f}")
         return loss
 
-    opt_start = time.time()
+    t0 = time.time()
     optimizer.step(closure)
-    opt_end = time.time()
+    elapsed = time.time() - t0
 
-    # 결과 확인
-    # Use physics loss only for angle error calculation (exclude joint penalty)
-    physics_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal).item()
-    
-    # Calculate joint penalty separately for reporting
-    waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
-    max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0].item()
-    max_joint_penalty = max_joint_angle * MAX_JOINT_WEIGHT
-    total_loss = physics_loss + max_joint_penalty
-    
-    # Calculate actual quaternion error for display
+    # Final metrics
     with torch.no_grad():
-        q_traj_temp, q_dot_traj_temp = physics.generate_trajectory(waypoints_param)
-        sim_out_temp = physics.simulate_single(q_traj_temp[0], q_dot_traj_temp[0], q0_start[0], q0_goal[0])
-        q_final_temp = sim_out_temp[1]
-        q1 = q_final_temp
-        q2 = q0_goal[0]
-        dot = torch.sum(q1 * q2).abs().clamp(-1.0, 1.0)
-        angle_rad = 2.0 * torch.acos(dot)
-        final_deg = angle_rad * 180.0 / math.pi
+        physics_loss = physics.calculate_loss(waypoints_param, q0_start, q0_goal).item()
+        waypoints_reshaped = waypoints_param.view(1, NUM_WAYPOINTS, robot["n_q"])
+        max_joint_angle = waypoints_reshaped.abs().view(1, -1).max(dim=1)[0].item()
+        total_loss = physics_loss + max_joint_angle * MAX_JOINT_WEIGHT
 
-    print(f"Optimization Finished (LBFGS). Time: {opt_end - opt_start:.4f}s")
-    print(f"Total Loss: {total_loss:.2e} (physics: {physics_loss:.2e}, joint_penalty: {max_joint_penalty:.2e})")
-    print(f"Angle Error: {final_deg.item():.2e}°")
-    print(f"Iterations: {len(loss_history)}")
-    print(f"Final waypoints: {waypoints_param}")
-
-    with torch.no_grad():
         q_traj, q_dot_traj = physics.generate_trajectory(waypoints_param)
-        q_traj_single = q_traj[0]
-        q_dot_traj_single = q_dot_traj[0]
-        euler_traj = compute_orientation_traj(physics, q_traj_single, q_dot_traj_single, q0_start[0])
+        sim_out = physics.simulate_single(q_traj[0], q_dot_traj[0], q0_start[0], q0_goal[0])
+        q_final = sim_out[1]
+        dot = torch.sum(q_final * q0_goal[0]).abs().clamp(-1.0, 1.0)
+        angle_deg = (2.0 * torch.acos(dot) * 180.0 / math.pi).item()
 
-        # Target body orientation in Euler angles (rad)
-        R_goal = quat_to_rot(q0_goal[0])
-        target_euler = rot_to_euler(R_goal)
+    return {
+        "label": label,
+        "loss_history": loss_history,
+        "final_loss": total_loss,
+        "physics_loss": physics_loss,
+        "angle_error_deg": angle_deg,
+        "time": elapsed,
+        "iterations": len(loss_history),
+        "waypoints": waypoints_param.detach(),
+    }
 
-        # --------------------------------------------------------------
-        # Debug: compare final vs desired orientation (quat + Euler)
-        # --------------------------------------------------------------
-        final_euler = euler_traj[-1]                     # [3] (yaw, pitch, roll)
-        target_euler_vec = target_euler                  # [3] (yaw, pitch, roll)
 
-        # Convert to degrees for readability
-        final_euler_deg = final_euler * 180.0 / math.pi
-        target_euler_deg = target_euler_vec * 180.0 / math.pi
+def plot_comparison(results, save_path, target_info=""):
+    """
+    Plot loss convergence curves and a summary bar chart for all initial guesses.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-        # Reconstruct quaternion from final Euler to check Euler<->quat consistency.
-        # NOTE: rot_to_euler returns [yaw, pitch, roll] (ZYX),
-        #       while euler_to_quaternion expects (roll, pitch, yaw).
-        yaw_f, pitch_f, roll_f = final_euler[0], final_euler[1], final_euler[2]
-        q_final = euler_to_quaternion(
-            roll_f.unsqueeze(0),
-            pitch_f.unsqueeze(0),
-            yaw_f.unsqueeze(0),
-        )  # [1, 4]
+    # 1) Loss convergence curves
+    ax = axes[0]
+    for r in results:
+        ax.plot(r["loss_history"], label=r["label"], linewidth=1.5)
+    ax.set_xlabel("LBFGS Iteration")
+    ax.set_ylabel("Loss")
+    ax.set_yscale("log")
+    ax.set_title("Loss Convergence")
+    ax.legend(fontsize=7)
+    ax.grid(True)
 
-        print("\n=== Orientation Check ===")
-        print("Final Euler (rad)   [yaw, pitch, roll]:", final_euler)
-        print("Target Euler (rad)  [yaw, pitch, roll]:", target_euler_vec)
-        print("Final Euler (deg)   [yaw, pitch, roll]:", final_euler_deg)
-        print("Target Euler (deg)  [yaw, pitch, roll]:", target_euler_deg)
-        print("Final quaternion (from Euler) :", q_final)
-        print("Target quaternion (q0_goal)   :", q0_goal)
+    # 2) Final loss bar chart
+    ax = axes[1]
+    labels = [r["label"] for r in results]
+    final_losses = [r["final_loss"] for r in results]
+    colors = ["tab:blue" if "Zero" in l else "tab:orange" for l in labels]
+    ax.bar(range(len(labels)), final_losses, color=colors, tick_label=labels)
+    ax.set_ylabel("Final Loss")
+    ax.set_title("Final Loss by Init")
+    ax.tick_params(axis="x", rotation=45)
+    ax.grid(True, axis="y")
 
-        plot_trajectory(
-            q_traj_single,
-            q_dot_traj_single,
-            euler_traj,
-            f"CVAE+LBFGS (Err: {physics_loss:.6f}, Angle: {final_deg.item():.2e}°)",
-            os.path.join(save_dir, "cvae_lbfgs_traj.png"),
-            TOTAL_TIME,
-            target_euler=target_euler,
+    # 3) Angle error bar chart
+    ax = axes[2]
+    angle_errors = [r["angle_error_deg"] for r in results]
+    ax.bar(range(len(labels)), angle_errors, color=colors, tick_label=labels)
+    ax.set_ylabel("Angle Error (deg)")
+    ax.set_title("Final Angle Error by Init")
+    ax.tick_params(axis="x", rotation=45)
+    ax.grid(True, axis="y")
+
+    fig.suptitle(f"Initial Guess Comparison  {target_info}", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"Saved comparison plot to {save_path}")
+
+
+def main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"=== Initial Guess Comparison (LBFGS) on {device} ===")
+
+    robot, _ = urdf2robot(os.path.join(ROOT_DIR, "assets/SC_ur10e.urdf"), verbose_flag=False, device=device)
+
+    NUM_WAYPOINTS = 3
+    OUTPUT_DIM = NUM_WAYPOINTS * robot["n_q"]
+    TOTAL_TIME = 10.0
+    MAX_JOINT_WEIGHT = 0.01
+    NUM_RANDOM_SEEDS = 5  # number of random initial guesses to try
+
+    physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
+
+    save_dir = os.path.join(ROOT_DIR, "outputs/results/opt_init_comparison")
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Target orientation (fixed for fair comparison)
+    q0_start = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device, dtype=torch.float32)
+    roll_deg, pitch_deg, yaw_deg = 20, 25, 15
+    roll_rad = math.radians(roll_deg)
+    pitch_rad = math.radians(pitch_deg)
+    yaw_rad = math.radians(yaw_deg)
+    q0_goal = euler_to_quaternion(
+        torch.tensor([roll_rad], device=device),
+        torch.tensor([pitch_rad], device=device),
+        torch.tensor([yaw_rad], device=device),
+    )
+    print(f"Target orientation: roll={roll_deg}°, pitch={pitch_deg}°, yaw={yaw_deg}°")
+
+    # ---- Build list of initial guesses ----
+    init_guesses = []
+
+    # Zero init
+    init_guesses.append(("Zero", torch.zeros(1, OUTPUT_DIM, device=device)))
+
+    # Random inits with different seeds
+    for seed in range(NUM_RANDOM_SEEDS):
+        torch.manual_seed(seed)
+        init_guesses.append((f"Rand(seed={seed})", torch.randn(1, OUTPUT_DIM, device=device)))
+
+    # ---- Run optimization for each init ----
+    results = []
+    for label, init in init_guesses:
+        print(f"\n--- {label} ---")
+        r = run_single_optimization(
+            physics, init, q0_start, q0_goal, robot,
+            NUM_WAYPOINTS, MAX_JOINT_WEIGHT, label, verbose=True,
         )
+        print(f"  Final Loss: {r['final_loss']:.6f}  |  Angle Error: {r['angle_error_deg']:.4f}°  |  Iters: {r['iterations']}  |  Time: {r['time']:.2f}s")
+        results.append(r)
 
-        # ------------------------------------------------------------------
-        # Save data for external (e.g., MATLAB) plotting as CSV files
-        # ------------------------------------------------------------------
-        dt = float(physics.dt)
-        num_steps = q_traj_single.shape[0]
-        t = np.linspace(0.0, TOTAL_TIME, num_steps)
+    # ---- Summary table ----
+    print("\n" + "=" * 80)
+    print(f"{'Init':<18} {'Final Loss':>12} {'Physics Loss':>14} {'Angle Err(°)':>14} {'Iters':>6} {'Time(s)':>8}")
+    print("-" * 80)
+    for r in results:
+        print(f"{r['label']:<18} {r['final_loss']:>12.6f} {r['physics_loss']:>14.6f} {r['angle_error_deg']:>14.4f} {r['iterations']:>6d} {r['time']:>8.2f}")
+    print("=" * 80)
 
-        q_traj_np = q_traj_single.detach().cpu().numpy()       # [T, n_q]
-        q_dot_np = q_dot_traj_single.detach().cpu().numpy()    # [T, n_q]
-        euler_np = euler_traj.detach().cpu().numpy()           # [T, 3] (rad)
-        waypoints_np = waypoints_param.detach().cpu().numpy()  # [1, W]
-        q0_start_np = q0_start.detach().cpu().numpy()          # [1, 4]
-        q0_goal_np = q0_goal.detach().cpu().numpy()            # [1, 4]
-        target_euler_np = target_euler.detach().cpu().numpy()  # [3] (rad)
+    # ---- Comparison plot ----
+    target_info = f"(target: roll={roll_deg}°, pitch={pitch_deg}°, yaw={yaw_deg}°)"
+    plot_comparison(results, os.path.join(save_dir, "init_comparison.png"), target_info)
 
-        # 1) Joint position trajectory: time + J1..Jn
-        n_q = robot["n_q"]
-        header_q = "t," + ",".join([f"J{i+1}" for i in range(n_q)])
-        q_traj_mat = np.column_stack([t, q_traj_np])
-        np.savetxt(
-            os.path.join(save_dir, "q_traj.csv"),
-            q_traj_mat,
-            delimiter=",",
-            header=header_q,
-            comments="",
-        )
+    # ---- Compare converged waypoints ----
+    # Only compare runs that actually converged (exclude zero if it got stuck)
+    converged = [r for r in results if r["angle_error_deg"] < 1.0]
+    n_q = robot["n_q"]
 
-        # 2) Joint velocity trajectory: time + dJ1..dJn
-        header_qdot = "t," + ",".join([f"dJ{i+1}" for i in range(n_q)])
-        q_dot_mat = np.column_stack([t, q_dot_np])
-        np.savetxt(
-            os.path.join(save_dir, "q_dot_traj.csv"),
-            q_dot_mat,
-            delimiter=",",
-            header=header_qdot,
-            comments="",
-        )
+    if len(converged) >= 2:
+        print("\n" + "=" * 80)
+        print("CONVERGED WAYPOINTS COMPARISON")
+        print("=" * 80)
 
-        # 3) Body orientation (Euler) and target orientation (rad)
-        #    Columns: t, yaw, pitch, roll, yaw_target, pitch_target, roll_target
-        target_tile = np.tile(target_euler_np.reshape(1, 3), (num_steps, 1))
-        body_mat = np.column_stack([t, euler_np, target_tile])
-        header_body = "t,yaw,pitch,roll,yaw_target,pitch_target,roll_target"
-        np.savetxt(
-            os.path.join(save_dir, "body_orientation.csv"),
-            body_mat,
-            delimiter=",",
-            header=header_body,
-            comments="",
-        )
+        # Print waypoints reshaped as (NUM_WAYPOINTS x n_q) for each run
+        for r in converged:
+            wp = r["waypoints"].cpu().numpy().reshape(NUM_WAYPOINTS, n_q)
+            print(f"\n{r['label']}  (loss={r['final_loss']:.4f}, angle_err={r['angle_error_deg']:.4f}°)")
+            for w in range(NUM_WAYPOINTS):
+                joint_str = "  ".join([f"{v:+7.3f}" for v in wp[w]])
+                print(f"  WP{w+1}: [{joint_str}]")
 
-        # 4) Waypoints (single row)
-        header_wp = ",".join([f"W{i+1}" for i in range(waypoints_np.shape[1])])
-        np.savetxt(
-            os.path.join(save_dir, "waypoints.csv"),
-            waypoints_np,
-            delimiter=",",
-            header=header_wp,
-            comments="",
-        )
+        # Pairwise L2 distance between converged waypoints
+        wp_tensors = torch.stack([r["waypoints"].squeeze(0) for r in converged])  # [N, OUTPUT_DIM]
+        N = wp_tensors.shape[0]
+        print(f"\nPairwise L2 distance between converged waypoints:")
+        labels_c = [r["label"] for r in converged]
+        header = f"{'':>18}" + "".join([f"{l:>18}" for l in labels_c])
+        print(header)
+        for i in range(N):
+            row = f"{labels_c[i]:>18}"
+            for j in range(N):
+                dist = torch.norm(wp_tensors[i] - wp_tensors[j]).item()
+                row += f"{dist:>18.4f}"
+            print(row)
 
-        # 5) Start / goal quaternion (each as separate CSV)
-        np.savetxt(
-            os.path.join(save_dir, "q0_start.csv"),
-            q0_start_np,
-            delimiter=",",
-            header="qx,qy,qz,qw",
-            comments="",
-        )
-        np.savetxt(
-            os.path.join(save_dir, "q0_goal.csv"),
-            q0_goal_np,
-            delimiter=",",
-            header="qx,qy,qz,qw",
-            comments="",
-        )
+        # Plot: overlay all converged joint trajectories
+        fig, axes = plt.subplots(NUM_WAYPOINTS, 1, figsize=(10, 3 * NUM_WAYPOINTS))
+        if NUM_WAYPOINTS == 1:
+            axes = [axes]
+        for w in range(NUM_WAYPOINTS):
+            ax = axes[w]
+            for r in converged:
+                wp = r["waypoints"].cpu().numpy().reshape(NUM_WAYPOINTS, n_q)
+                ax.bar(
+                    np.arange(n_q) + converged.index(r) * 0.15,
+                    wp[w],
+                    width=0.15,
+                    label=r["label"],
+                )
+            ax.set_title(f"Waypoint {w+1} joint values")
+            ax.set_xlabel("Joint index")
+            ax.set_ylabel("Angle (rad)")
+            ax.set_xticks(np.arange(n_q))
+            ax.set_xticklabels([f"J{i+1}" for i in range(n_q)])
+            ax.legend(fontsize=7)
+            ax.grid(True, axis="y")
+        plt.tight_layout()
+        wp_plot_path = os.path.join(save_dir, "waypoints_comparison.png")
+        plt.savefig(wp_plot_path, dpi=150)
+        plt.close()
+        print(f"\nSaved waypoints comparison plot to {wp_plot_path}")
 
-        # 6) Meta info (dt, total_time)
-        meta_path = os.path.join(save_dir, "meta.csv")
-        with open(meta_path, "w") as f:
-            f.write("dt,total_time\n")
-            f.write(f"{dt},{TOTAL_TIME}\n")
+        # Plot: overlay all converged joint angle trajectories
+        fig, axes = plt.subplots(n_q, 1, figsize=(10, 2.5 * n_q), sharex=True)
+        if n_q == 1:
+            axes = [axes]
+        with torch.no_grad():
+            for r in converged:
+                q_traj, q_dot_traj = physics.generate_trajectory(r["waypoints"])
+                q_np = q_traj[0].cpu().numpy()  # [T, n_q]
+                t_arr = np.linspace(0.0, TOTAL_TIME, q_np.shape[0])
+                for j in range(n_q):
+                    axes[j].plot(t_arr, q_np[:, j], label=r["label"], linewidth=1.2)
+            for j in range(n_q):
+                axes[j].set_ylabel(f"J{j+1} (rad)")
+                axes[j].grid(True)
+                if j == 0:
+                    axes[j].legend(fontsize=7, loc="upper right")
+            axes[-1].set_xlabel("Time [s]")
+        fig.suptitle("Joint Trajectories - All Converged Runs", fontsize=12)
+        plt.tight_layout()
+        traj_plot_path = os.path.join(save_dir, "trajectories_comparison.png")
+        plt.savefig(traj_plot_path, dpi=150)
+        plt.close()
+        print(f"Saved trajectories comparison plot to {traj_plot_path}")
 
-        print(f"Saved CSV trajectory data to {save_dir}")
+    # ---- Per-run trajectory plots for best and worst ----
+    best = min(results, key=lambda r: r["angle_error_deg"])
+    worst = max(results, key=lambda r: r["angle_error_deg"])
+
+    R_goal = quat_to_rot(q0_goal[0])
+    target_euler = rot_to_euler(R_goal)
+
+    for tag, r in [("best", best), ("worst", worst)]:
+        with torch.no_grad():
+            q_traj, q_dot_traj = physics.generate_trajectory(r["waypoints"].unsqueeze(0) if r["waypoints"].dim() == 1 else r["waypoints"])
+            euler_traj = compute_orientation_traj(physics, q_traj[0], q_dot_traj[0], q0_start[0])
+            plot_trajectory(
+                q_traj[0], q_dot_traj[0], euler_traj,
+                f"{tag.upper()} ({r['label']}, Err: {r['angle_error_deg']:.4f}°)",
+                os.path.join(save_dir, f"traj_{tag}_{r['label'].replace('=','').replace('(','').replace(')','')}.png"),
+                TOTAL_TIME,
+                target_euler=target_euler,
+            )
+
+    print(f"\nBest  init: {best['label']}  (angle error: {best['angle_error_deg']:.4f}°)")
+    print(f"Worst init: {worst['label']}  (angle error: {worst['angle_error_deg']:.4f}°)")
 
 
 if __name__ == "__main__":
