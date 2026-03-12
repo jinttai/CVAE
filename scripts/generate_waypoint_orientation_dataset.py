@@ -168,7 +168,7 @@ def plot_distributions(waypoints_np, euler_np, q_final_np, n_q, num_waypoints, s
 def main():
     parser = argparse.ArgumentParser(
         description="Generate waypoint -> orientation change dataset")
-    parser.add_argument("--num-samples", type=int, default=100000,
+    parser.add_argument("--num-samples", type=int, default=1000000,
                         help="Total samples (default: 100000)")
     parser.add_argument("--batch-size", type=int, default=1024,
                         help="Batch size (default: 1024)")
