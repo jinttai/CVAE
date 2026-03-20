@@ -45,8 +45,8 @@ SCENARIO = {
 
     # ── Cost weights (orientation cost: log(eps + 0.5*trace((R-Rg)^T(R-Rg)))) ──
     "orientation_weight": 10.0,
-    "joint_weight": 10.0,
-    "joint_vel_weight": 100.0,
+    "joint_weight": 100.0,
+    "joint_vel_weight": 50.0,
     "vel_idx11_weight": 100.0,
     "R_weight": 1e-2,
 

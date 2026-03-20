@@ -167,7 +167,7 @@ def main():
     # ============================================================================
     # SWITCH: Choose between iLQR and DDP
     # ============================================================================
-    USE_ILQR = True  # Set to True for iLQR (faster), False for full DDP (slower, more accurate)
+    USE_ILQR = False  # Set to True for iLQR (faster), False for full DDP (slower, more accurate)
     USE_ALM = True   # Set to True to use Augmented Lagrangian Method for joint limits
     # ============================================================================
 
