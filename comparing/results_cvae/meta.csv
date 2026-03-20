@@ -1,9 +1,0 @@
-key,value
-elapsed_s,2.2425
-sample_time_s,1.5118
-opt_time_s,0.7308
-physics_loss,-6.82484627
-total_loss,-6.45101404
-angle_err_deg,1.8884
-total_time,10.0
-weights,v1.pth
