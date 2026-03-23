@@ -231,13 +231,23 @@ def kinematics(R0, r0, qm, robot):
     n = robot['n_links_joints']
     device = R0.device
     dtype = R0.dtype
-    
-    # T0 block [[R0, r0], [0, 1]]
-    # T0 = torch.eye(4, device=device, dtype=dtype)
-    # T0[:3, :3] = R0
-    # T0[:3, 3] = r0.flatten()
-    # Avoid in-place
+
+    # Pre-fetch stacked robot data (already on correct device from urdf2robot)
+    stk = robot['stacked']
+    joint_T_all = stk['joint_T']          # [n, 4, 4]
+    joint_axes_all = stk['joint_axes']    # [n, 3]
+    joint_types = stk['joint_types']      # Python list
+    joint_q_ids = stk['joint_q_ids']      # Python list
+    joint_parent_links = stk['joint_parent_links']
+    link_T_all = stk['link_T']            # [n, 4, 4]
+    link_ids = stk['link_ids']
+    link_parent_joints = stk['link_parent_joints']
+
+    # Pre-allocate constants (once per call, not per loop iteration)
     row4 = torch.tensor([0, 0, 0, 1], device=device, dtype=dtype).reshape(1, 4)
+    zeros31 = torch.zeros((3, 1), device=device, dtype=dtype)
+    eye4 = torch.eye(4, device=device, dtype=dtype)
+
     T0 = torch.cat([
         torch.cat([R0, r0.reshape(3, 1)], dim=1),
         row4
@@ -245,99 +255,56 @@ def kinematics(R0, r0, qm, robot):
 
     TJ_list = [None] * n
     TL_list = [None] * n
-    
+
     for i in range(n):
-        joint = robot['joints'][i]
-        
-        # Ensure joint['T'] is on correct device
-        joint_T = joint['T'].to(device=device, dtype=dtype)
-        
-        if joint['parent_link'] == 0:
+        joint_T = joint_T_all[i]  # [4, 4] — already on device
+
+        if joint_parent_links[i] == 0:
             TJ_val = T0 @ joint_T
         else:
-            # parent_link is 1-based index for links list?
-            # urdf2robot: robot_keys['link_id'][base_link_name] = 0.
-            # child_link: link_id + 1.
-            # So link IDs are 1..n.
-            # TL_list is 0..n-1 corresponding to link 1..n.
-            # parent_link - 1 gives index in TL_list.
-            TJ_val = TL_list[joint['parent_link'] - 1] @ joint_T
-            
+            TJ_val = TL_list[joint_parent_links[i] - 1] @ joint_T
+
         TJ_list[i] = TJ_val
-        
-        T_qm = torch.eye(4, device=device, dtype=dtype)
-        
-        if joint['type'] == 1:
-            # T_qm block
-            axis = joint['axis'].to(device=device, dtype=dtype)
-            # Easiest way to construct T_qm without inplace:
-            # Use the rotation matrix and manually build 4x4
-            R_qm = euler_dcm(axis, qm[joint['q_id'] - 1])
-            zeros = torch.zeros((3, 1), device=device, dtype=dtype)
-            
-            # [[R, 0], [0, 1]]
+
+        jtype = joint_types[i]
+        if jtype == 1:
+            axis = joint_axes_all[i]  # [3] — already on device
+            R_qm = euler_dcm(axis, qm[joint_q_ids[i] - 1])
             T_qm = torch.cat([
-                torch.cat([R_qm, zeros], dim=1),
+                torch.cat([R_qm, zeros31], dim=1),
                 row4
             ], dim=0)
-            
-        elif joint['type'] == 2:
-            # joint['axis'].reshape(3,1) * qm[...]
-            axis = joint['axis'].to(device=device, dtype=dtype)
-            p_qm = (axis.flatten() * qm[joint['q_id'] - 1]).reshape(3, 1)
-            I3 = torch.eye(3, device=device, dtype=dtype)
-            
+        elif jtype == 2:
+            axis = joint_axes_all[i]
+            p_qm = (axis * qm[joint_q_ids[i] - 1]).reshape(3, 1)
             T_qm = torch.cat([
-                torch.cat([I3, p_qm], dim=1),
+                torch.cat([eye4[:3, :3], p_qm], dim=1),
                 row4
             ], dim=0)
         else:
-            pass # Identity
-            
-        link = robot['links'][joint['child_link'] - 1]
-        link_T = link['T'].to(device=device, dtype=dtype)
-        
-        # TJ_list[i] corresponds to joint['id']-1?
-        # joint['id'] is i+1. So yes.
-        # link['parent_joint'] should be i+1.
-        
+            T_qm = eye4
+
+        link_T = link_T_all[stk['joint_child_links'][i] - 1]  # [4, 4]
         TL_val = TJ_val @ T_qm @ link_T
-        TL_list[link['id'] - 1] = TL_val
-    
+        TL_list[link_ids[i] - 1] = TL_val
+
     # Stack lists to create tensors
     TJ = torch.stack(TJ_list, dim=2)
     TL = torch.stack(TL_list, dim=2)
-    
+
     RJ = TJ[:3, :3, :]
     RL = TL[:3, :3, :]
     rJ = TJ[:3, 3, :]
     rL = TL[:3, 3, :]
-    
-    e_list = []
-    g_list = []
-    
-    for i in range(n):
-        axis = robot['joints'][i]['axis'].to(device=device, dtype=dtype)
-        e_val = RJ[:, :, i] @ axis
-        
-        # rL[:, i] is rL_i
-        # rJ parent: robot['links'][i]['parent_joint'] - 1
-        # parent_joint of link i is joint i+1 (id i+1).
-        # So parent_joint index is i.
-        # Wait, g vector definition: rL_i - rJ_i.
-        # Code says: rL[:, i] - rJ[:, robot['links'][i]['parent_joint'] - 1]
-        
-        # Check indices:
-        # link i has parent joint.
-        pj_idx = robot['links'][i]['parent_joint'] - 1
-        g_val = rL[:, i] - rJ[:, pj_idx]
-        
-        e_list.append(e_val)
-        g_list.append(g_val)
-        
-    e = torch.stack(e_list, dim=1)
-    g = torch.stack(g_list, dim=1)
-        
+
+    # Vectorized e and g computation (no loop needed)
+    # e[:, i] = RJ[:, :, i] @ joint_axes_all[i]
+    e = torch.einsum('ijk,kj->ik', RJ, joint_axes_all)  # [3, n]
+
+    # g[:, i] = rL[:, i] - rJ[:, parent_joint_idx[i]]
+    pj_indices = [pj - 1 for pj in link_parent_joints]  # Python list of ints
+    g = rL - rJ[:, pj_indices]  # [3, n]
+
     return RJ, RL, rJ, rL, e, g
 
 def diff_kinematics(R0, r0, rL, e, g, robot):
@@ -452,39 +419,45 @@ def diff_kinematics(R0, r0, rL, e, g, robot):
     Bi0_row2 = torch.cat([skew_Bi0, I3_n], dim=1) # [3, 6, n]
     Bi0 = torch.cat([Bi0_row1, Bi0_row2], dim=0) # [6, 6, n]
     
-    # 4. pm calculation
-    # Vectorized approach hard because of conditional logic based on joint type?
-    # Joint types are in a list, not tensor. But we can iterate or mask.
-    # n is usually small (e.g., 12-20). Loop might be fine, but we can vectorize if we gather types.
-    
-    # Since n is small, let's keep loop for pm or use simple masking if all revolute.
-    # A1 robot is all revolute (type 1).
-    # General solution:
-    
-    # [Fix for vmap inplace error]
-    # Instead of pm[:, i] = ..., use a list and stack.
-    
-    # Vectorized cross product
-    cross_eg = torch.linalg.cross(e, g, dim=0) # [3, n]
-    
-    pm_list = []
-    
-    for i in range(n):
-        jt = robot['joints'][i]['type']
-        if jt == 1: # Revolute
-            # pm_i = [e[:, i], cross_eg[:, i]]
-            pm_i = torch.cat([e[:, i], cross_eg[:, i]], dim=0)
-        elif jt == 2: # Prismatic
-            # pm_i = [zeros(3), e[:, i]]
-            zeros_3 = torch.zeros(3, device=device, dtype=dtype)
-            pm_i = torch.cat([zeros_3, e[:, i]], dim=0)
-        else:
-            pm_i = torch.zeros(6, device=device, dtype=dtype)
-        
-        pm_list.append(pm_i)
-    
-    pm = torch.stack(pm_list, dim=1) # [6, n]
-            
+    # 4. pm calculation — vectorized
+    cross_eg = torch.linalg.cross(e, g, dim=0)  # [3, n]
+
+    # Build pm based on joint types using pre-computed masks
+    # For revolute: pm = [e, cross(e,g)], for prismatic: pm = [0, e], for fixed: pm = 0
+    joint_types = robot['stacked']['joint_types']
+
+    # Start with zeros
+    pm = torch.zeros((6, n), device=device, dtype=dtype)
+
+    # Build revolute and prismatic contributions without loop
+    # Since joint_types is a Python list of ints (static per robot), we can use index lists
+    rev_idx = [i for i, t in enumerate(joint_types) if t == 1]
+    pri_idx = [i for i, t in enumerate(joint_types) if t == 2]
+
+    if rev_idx:
+        pm_rev = torch.cat([e[:, rev_idx], cross_eg[:, rev_idx]], dim=0)  # [6, n_rev]
+        # Scatter back — use list indexing (vmap-safe, no in-place on pm)
+        pm_parts = []
+        rev_set = set(rev_idx)
+        pri_set = set(pri_idx)
+        for i in range(n):
+            if i in rev_set:
+                pm_parts.append(torch.cat([e[:, i], cross_eg[:, i]], dim=0))
+            elif i in pri_set:
+                pm_parts.append(torch.cat([torch.zeros(3, device=device, dtype=dtype), e[:, i]], dim=0))
+            else:
+                pm_parts.append(torch.zeros(6, device=device, dtype=dtype))
+        pm = torch.stack(pm_parts, dim=1)  # [6, n]
+    elif pri_idx:
+        pm_parts = []
+        pri_set = set(pri_idx)
+        for i in range(n):
+            if i in pri_set:
+                pm_parts.append(torch.cat([torch.zeros(3, device=device, dtype=dtype), e[:, i]], dim=0))
+            else:
+                pm_parts.append(torch.zeros(6, device=device, dtype=dtype))
+        pm = torch.stack(pm_parts, dim=1)
+
     return Bij, Bi0, P0, pm
 
 def velocities(Bij, Bi0, P0, pm, u0, um, robot):
@@ -516,76 +489,64 @@ def velocities(Bij, Bi0, P0, pm, u0, um, robot):
 def inertia_projection(R0, RL, robot):
     device = R0.device
     dtype = R0.dtype
-    
-    base_inertia = robot['base_link']['inertia'].to(device=device, dtype=dtype)
-    I0 = R0 @ base_inertia @ R0.T
-    
-    n = robot['n_links_joints']
-    Im_list = []
-    for i in range(n):
-        link_inertia = robot['links'][i]['inertia'].to(device=device, dtype=dtype)
-        # RL[:, :, i] is (3, 3)
-        val = RL[:, :, i] @ link_inertia @ RL[:, :, i].T
-        Im_list.append(val)
-        
-    Im = torch.stack(Im_list, dim=2)
+    stk = robot['stacked']
+
+    # Base inertia (already on device)
+    I0 = R0 @ stk['base_inertia'] @ R0.T
+
+    # Vectorized link inertia projection: Im[:,:,i] = RL[:,:,i] @ link_inertia[i] @ RL[:,:,i].T
+    # RL: [3, 3, n] -> RL_t: [n, 3, 3]
+    RL_t = RL.permute(2, 0, 1)                          # [n, 3, 3]
+    link_inertias = stk['link_inertias']                 # [n, 3, 3] — already on device
+    Im_t = RL_t @ link_inertias @ RL_t.transpose(-2, -1)  # [n, 3, 3] batched bmm
+    Im = Im_t.permute(1, 2, 0)                           # [3, 3, n]
+
     return I0, Im
 
 def mass_composite_body(I0, Im, Bij, Bi0, robot):
     n = robot['n_links_joints']
     device = I0.device
     dtype = I0.dtype
-    
-    # Mm_tilde = torch.zeros((6, 6, n), device=device, dtype=dtype)
-    # Since we fill in reverse, we can't append.
-    # Pre-allocate a list of None, then stack.
-    # But updating happens in reverse and depends on children.
-    # Mm_tilde[:, :, i] += ... where children j > i.
-    # So when computing i, we need values for j which are already computed.
-    
+    stk = robot['stacked']
+    children_list = robot['con']['children_list']
+    children_base = robot['con']['children_base']
+
+    # Pre-allocate constants (once, not per loop iteration)
+    zeros33 = torch.zeros((3, 3), device=device, dtype=dtype)
+    I3 = torch.eye(3, device=device, dtype=dtype)
+    link_masses = stk['link_masses']  # [n] — already on device
+
     Mm_tilde_list = [None] * n
-    
+
     for i in reversed(range(n)):
-        # Mm_tilde block [[Im, 0], [0, m*I]]
         Im_i = Im[:, :, i]
-        mass_i = torch.as_tensor(robot['links'][i]['mass'], device=device, dtype=dtype)
-        zeros = torch.zeros((3, 3), device=device, dtype=dtype)
-        I3 = torch.eye(3, device=device, dtype=dtype)
-        
-        # Initial value
+        mass_i = link_masses[i]
+
         val = torch.cat([
-            torch.cat([Im_i, zeros], dim=1),
-            torch.cat([zeros, mass_i * I3], dim=1)
+            torch.cat([Im_i, zeros33], dim=1),
+            torch.cat([zeros33, mass_i * I3], dim=1)
         ], dim=0)
-        
-        children = torch.nonzero(robot['con']['child'][:, i] == 1, as_tuple=True)[0]
-        for j in children:
-            # j > i guaranteed by traversal order? Usually yes.
-            # Bij[:, :, j, i].T @ Mm_tilde[:, :, j] @ Bij[:, :, j, i]
-            # Mm_tilde_list[j] should be valid.
-            
+
+        for j in children_list[i]:
             term = Bij[:, :, j, i].T @ Mm_tilde_list[j] @ Bij[:, :, j, i]
             val = val + term
-            
+
         Mm_tilde_list[i] = val
-            
+
     Mm_tilde = torch.stack(Mm_tilde_list, dim=2)
-            
+
     # M0_tilde block [[I0, 0], [0, m*I]]
-    mass_base = torch.as_tensor(robot['base_link']['mass'], device=device, dtype=dtype)
-    zeros = torch.zeros((3, 3), device=device, dtype=dtype)
-    I3 = torch.eye(3, device=device, dtype=dtype)
-    
+    mass_base = stk['base_mass']
+
     M0_tilde = torch.cat([
-        torch.cat([I0, zeros], dim=1),
-        torch.cat([zeros, mass_base * I3], dim=1)
+        torch.cat([I0, zeros33], dim=1),
+        torch.cat([zeros33, mass_base * I3], dim=1)
     ], dim=0)
-    
-    children = torch.nonzero(robot['con']['child_base'] == 1, as_tuple=True)[0]
-    for j in children:
+
+    for j in children_base:
         term = Bi0[:, :, j].T @ Mm_tilde_list[j] @ Bi0[:, :, j]
         M0_tilde = M0_tilde + term
-        
+
     return M0_tilde, Mm_tilde
 
 def generalized_inertia_matrix_old(M0_tilde, Mm_tilde, Bij, Bi0, P0, pm, robot):

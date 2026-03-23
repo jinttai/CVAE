@@ -458,6 +458,37 @@ def urdf2robot(filename, verbose_flag=False, device='cpu', dtype=torch.float32):
         'child_base': child_base
     }
 
+    # Pre-compute children lists (avoids torch.nonzero in hot path)
+    n = robot['n_links_joints']
+    children_list = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if child[j, i] == 1:
+                children_list[i].append(j)
+    children_base = []
+    for j in range(n):
+        if child_base[j] == 1:
+            children_base.append(j)
+    robot['con']['children_list'] = children_list
+    robot['con']['children_base'] = children_base
+
+    # Pre-stack tensors for vectorized access (avoids per-element indexing in loops)
+    robot['stacked'] = {
+        'joint_T': torch.stack([j['T'] for j in robot['joints']], dim=0),         # [n, 4, 4]
+        'joint_axes': torch.stack([j['axis'] for j in robot['joints']], dim=0),    # [n, 3]
+        'joint_types': [j['type'] for j in robot['joints']],                       # Python list
+        'joint_q_ids': [j['q_id'] for j in robot['joints']],                      # Python list
+        'joint_parent_links': [j['parent_link'] for j in robot['joints']],         # Python list
+        'joint_child_links': [j['child_link'] for j in robot['joints']],           # Python list
+        'link_T': torch.stack([l['T'] for l in robot['links']], dim=0),            # [n, 4, 4]
+        'link_inertias': torch.stack([l['inertia'] for l in robot['links']], dim=0),  # [n, 3, 3]
+        'link_masses': torch.tensor([l['mass'] for l in robot['links']], device=device, dtype=dtype),  # [n]
+        'link_parent_joints': [l['parent_joint'] for l in robot['links']],         # Python list
+        'link_ids': [l['id'] for l in robot['links']],                             # Python list
+        'base_mass': torch.tensor(robot['base_link']['mass'], device=device, dtype=dtype),  # scalar
+        'base_inertia': robot['base_link']['inertia'],                             # [3, 3]
+    }
+
     return robot, robot_keys
 
 
