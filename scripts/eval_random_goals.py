@@ -47,14 +47,13 @@ def main():
 
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
-    # 1024 random goals
+    # 1024 random goals (full range uniform)
     N_GOALS = 1024
-    max_rad = math.radians(30.0)
 
     torch.manual_seed(42)
-    yaw = (2 * max_rad) * torch.rand(N_GOALS, device=device) - max_rad
-    pitch = (2 * max_rad) * torch.rand(N_GOALS, device=device) - max_rad
-    roll = (2 * max_rad) * torch.rand(N_GOALS, device=device) - max_rad
+    yaw   = 2 * math.pi * torch.rand(N_GOALS, device=device) - math.pi    # [-pi, pi]
+    pitch = math.pi * torch.rand(N_GOALS, device=device) - math.pi / 2    # [-pi/2, pi/2]
+    roll  = 2 * math.pi * torch.rand(N_GOALS, device=device) - math.pi    # [-pi, pi]
 
     q0_goals = euler_to_quaternion(roll, pitch, yaw)  # [1024, 4]
     q0_start = torch.zeros(N_GOALS, 4, device=device)
