@@ -130,23 +130,23 @@ def main():
 
             # Best per goal
             best_idx = total_loss_grid.argmin(dim=1)  # [n_goals_batch]
-            for i in range(n_goals_batch):
-                best_losses.append(total_loss_grid[i, best_idx[i]].item())
-                best_physics_losses.append(physics_loss_grid[i, best_idx[i]].item())
+            best_total = total_loss_grid[torch.arange(n_goals_batch), best_idx]  # [n_goals_batch]
+            best_phys = physics_loss_grid[torch.arange(n_goals_batch), best_idx]  # [n_goals_batch]
+            best_losses.append(best_total.cpu().numpy())
+            best_physics_losses.append(best_phys.cpu().numpy())
 
-            # Angle error for best candidates
-            best_candidates = candidates.view(n_goals_batch, NUM_SAMPLES_PER_GOAL, -1)
-            for i in range(n_goals_batch):
-                wp = best_candidates[i, best_idx[i]].unsqueeze(0)
-                q_traj, q_dot_traj = physics.generate_trajectory(wp)
-                sim_out = physics.simulate_single(
-                    q_traj[0], q_dot_traj[0], q0_start[0], goals_batch[i]
-                )
-                q_final = sim_out[1]
-                q_goal_i = goals_batch[i]
-                dot = torch.sum(q_final * q_goal_i).abs().clamp(-1.0, 1.0)
-                err_deg = (2.0 * torch.acos(dot) * 180.0 / math.pi).item()
-                angle_errors.append(err_deg)
+            # Angle error for best candidates (batched)
+            all_candidates = candidates.view(n_goals_batch, NUM_SAMPLES_PER_GOAL, -1)
+            best_wp = all_candidates[torch.arange(n_goals_batch), best_idx]  # [n_goals_batch, output_dim]
+            q0_start_bg = q0_start.expand(n_goals_batch, -1)  # [n_goals_batch, 4]
+
+            q_traj, q_dot_traj = physics.generate_trajectory(best_wp)  # [n_goals_batch, T, n_q]
+            batch_sim_fn = torch.func.vmap(physics.simulate_single, in_dims=(0, 0, 0, 0))
+            _, q_final_batch = batch_sim_fn(q_traj, q_dot_traj, q0_start_bg, goals_batch)  # [n_goals_batch, 4]
+
+            dot = (q_final_batch * goals_batch).sum(dim=1).abs().clamp(-1.0, 1.0)  # [n_goals_batch]
+            err_deg = 2.0 * torch.acos(dot) * 180.0 / math.pi  # [n_goals_batch]
+            angle_errors.append(err_deg.cpu().numpy())
 
             elapsed = time.time() - t0
             print(f"  [{batch_end}/{N_GOALS}] elapsed={elapsed:.1f}s")
@@ -154,9 +154,9 @@ def main():
     total_time = time.time() - t0
     print(f"\nTotal time: {total_time:.1f}s")
 
-    best_losses = np.array(best_losses)
-    best_physics_losses = np.array(best_physics_losses)
-    angle_errors = np.array(angle_errors)
+    best_losses = np.concatenate(best_losses)
+    best_physics_losses = np.concatenate(best_physics_losses)
+    angle_errors = np.concatenate(angle_errors)
     euler_np = euler_goals.cpu().numpy()  # [1024, 3] in rad
 
     # Statistics
