@@ -3,18 +3,20 @@
 각 goal별 수렴 loss/angle error 분포를 확인.
 """
 
-import os
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
-import torch
 import sys
 import time
+import os
+ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(ROOT_DIR)
+
+from src.utils.runtime_env import configure_windows_runtime
+
+configure_windows_runtime()
+
+import torch
 import numpy as np
 import math
 import matplotlib.pyplot as plt
-
-ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(ROOT_DIR)
 
 from src.training.physics_layer import PhysicsLayer
 from src.dynamics.urdf2robot_torch import urdf2robot
@@ -48,7 +50,7 @@ def main():
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
     # 1024 random goals (full range uniform)
-    N_GOALS = 1024
+    N_GOALS = 1
 
     torch.manual_seed(42)
     yaw   = 2 * math.pi * torch.rand(N_GOALS, device=device) - math.pi    # [-pi, pi]

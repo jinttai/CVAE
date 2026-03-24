@@ -6,13 +6,20 @@ saves model and visualizations.
 
 import os
 import pickle
-import numpy as np
+import sys
+
+ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(ROOT_DIR)
+
+from src.utils.runtime_env import configure_windows_runtime
+
+configure_windows_runtime()
+
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.mixture import GaussianMixture
 from scipy.stats import norm
-
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Paths
 DATA_PATH = "outputs/data/waypoint_orientation_dataset.pt"

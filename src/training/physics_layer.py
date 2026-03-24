@@ -3,6 +3,40 @@ import src.dynamics.spart_functions_torch as spart
 from torch.func import vmap  # Auto-Batching
 
 
+def _so3_log_standalone(R):
+    """SO(3) log map: rotation matrix → 3D rotation vector (axis-angle).
+    autograd 호환 (in-place 연산 없음).
+    """
+    trace_val = R[0, 0] + R[1, 1] + R[2, 2]
+    cos_theta = torch.clamp((trace_val - 1.0) / 2.0, -1.0 + 1e-7, 1.0 - 1e-7)
+    theta = torch.acos(cos_theta)
+    sin_theta = torch.sin(theta)
+
+    # θ → 0 일 때 factor → 0.5  (Taylor 1차)
+    factor = torch.where(
+        theta.abs() < 1e-6,
+        torch.ones_like(theta) * 0.5,
+        theta / (2.0 * sin_theta + 1e-12),
+    )
+
+    omega = factor * torch.stack([
+        R[2, 1] - R[1, 2],
+        R[0, 2] - R[2, 0],
+        R[1, 0] - R[0, 1],
+    ])
+    return omega  # [3]
+
+
+def _skew_functional(v):
+    """Skew-symmetric matrix from 3D vector (no in-place ops, autograd safe)."""
+    vx, vy, vz = v[0], v[1], v[2]
+    zero = torch.zeros_like(vx)
+    row0 = torch.stack([zero, -vz, vy])
+    row1 = torch.stack([vz, zero, -vx])
+    row2 = torch.stack([-vy, vx, zero])
+    return torch.stack([row0, row1, row2])
+
+
 class PhysicsLayer:
     """
     Rotation-Matrix 기반 물리 레이어.
@@ -26,6 +60,9 @@ class PhysicsLayer:
         self.dt = 0.1
         self.num_steps = int(total_time / self.dt)
         self.device = device
+        self.num_segments = self.num_waypoints + 1
+        self.steps_per_segment = self.num_steps // self.num_segments
+        self.segment_remainder = self.num_steps % self.num_segments
 
         # Pre-allocated constant tensors to reduce per-step allocations
         self.R0 = torch.eye(3, device=self.device)
@@ -36,11 +73,35 @@ class PhysicsLayer:
         # Pre-computed constants to avoid recalculation
         self._damping_value = 1e-6
         self._damping_term = self._damping_value * self.eye6  # Pre-compute: 1e-6 * eye6
+        self._dtype_runtime_cache = {}
+        self._batch_sim_fn = vmap(self.simulate_single, in_dims=(0, 0, 0, 0))
         
         # Pre-allocate buffers for constraint solver (reused each step)
         # Note: These are single-use buffers, but pre-allocation helps with memory management
         self._rhs_buffer = torch.zeros(6, device=self.device, dtype=torch.float32)
         self._H0_damped_buffer = torch.zeros(6, 6, device=self.device, dtype=torch.float32)
+
+    def _get_runtime_constants(self, dtype):
+        cached = self._dtype_runtime_cache.get(dtype)
+        if cached is not None:
+            return cached
+
+        segment_steps = tuple(
+            self.steps_per_segment + (1 if seg < self.segment_remainder else 0)
+            for seg in range(self.num_segments)
+        )
+        cached = {
+            "R0": torch.eye(3, device=self.device, dtype=dtype),
+            "r0": torch.zeros(3, device=self.device, dtype=dtype),
+            "eye3": torch.eye(3, device=self.device, dtype=dtype),
+            "damping_term": self._damping_value * torch.eye(6, device=self.device, dtype=dtype),
+            "segment_times": tuple(
+                torch.linspace(0, 1, steps, device=self.device, dtype=dtype)
+                for steps in segment_steps
+            ),
+        }
+        self._dtype_runtime_cache[dtype] = cached
+        return cached
 
     # ------------------------------------------------------------------
     # Trajectory Generation (quintic polynomial)
@@ -100,12 +161,13 @@ class PhysicsLayer:
         """
         batch_size = waypoints_flat.size(0)
         w_mid = waypoints_flat.view(batch_size, self.num_waypoints, self.n_q)
+        runtime = self._get_runtime_constants(waypoints_flat.dtype)
 
         # 시작점과 끝점 설정
         if q_start is None:
-            q_start = torch.zeros(batch_size, self.n_q, device=self.device)
+            q_start = waypoints_flat.new_zeros(batch_size, self.n_q)
         if q_end is None:
-            q_end = torch.zeros(batch_size, self.n_q, device=self.device)
+            q_end = waypoints_flat.new_zeros(batch_size, self.n_q)
         
         # q_start와 q_end를 [B, 1, n_q] 형태로 변환
         q_start = q_start.unsqueeze(1) if q_start.dim() == 2 else q_start.view(batch_size, 1, self.n_q)
@@ -115,22 +177,20 @@ class PhysicsLayer:
 
         # 전체 시간을 4분절로 나눔
         num_segments = self.num_waypoints + 1  # 4분절
-        steps_per_segment = self.num_steps // num_segments
-        remainder = self.num_steps % num_segments
+        num_segments = self.num_segments
 
-        q_traj = torch.zeros(batch_size, self.num_steps, self.n_q, device=self.device)
-        q_dot_traj = torch.zeros(batch_size, self.num_steps, self.n_q, device=self.device)
+        q_traj = waypoints_flat.new_zeros(batch_size, self.num_steps, self.n_q)
+        q_dot_traj = waypoints_flat.new_zeros(batch_size, self.num_steps, self.n_q)
 
         step_idx = 0
-        for seg in range(num_segments):
+        for seg, t_seg in enumerate(runtime["segment_times"]):
             q_start = w_full[:, seg, :]  # [B, n_q]
             q_end = w_full[:, seg + 1, :]  # [B, n_q]
 
             # 현재 분절의 스텝 수
-            seg_steps = steps_per_segment + (1 if seg < remainder else 0)
+            seg_steps = t_seg.numel()
 
             # 분절 내 정규화된 시간 [0, 1]
-            t_seg = torch.linspace(0, 1, seg_steps, device=self.device, dtype=waypoints_flat.dtype)
 
             # quintic polynomial으로 위치 계산: [B, seg_steps, n_q]
             q_seg = self._quintic_segment(q_start, q_end, t_seg)
@@ -139,7 +199,7 @@ class PhysicsLayer:
             q_dot_seg = self._quintic_derivative(q_start, q_end, t_seg)
 
             # 시간 스케일링 (전체 시간에 맞춤)
-            segment_time = (self.total_time / num_segments)
+            segment_time = (self.total_time / self.num_segments)
             q_dot_seg = q_dot_seg / segment_time
 
             q_traj[:, step_idx:step_idx + seg_steps, :] = q_seg
@@ -226,7 +286,7 @@ class PhysicsLayer:
         # 공통적으로 사용할 항들 계산 (reuse wb_norm)
         axis = wb / (wb_norm + 1e-12)  # Reuse norm calculation
         K = self._skew(axis)
-        I = self.eye3.to(dtype=wb.dtype)
+        I = self._get_runtime_constants(wb.dtype)["eye3"]
 
         sin_theta = torch.sin(theta)
         cos_theta = torch.cos(theta)
@@ -312,8 +372,9 @@ class PhysicsLayer:
     # ------------------------------------------------------------------
     def _compute_wb(self, qm, qd):
         """Compute angular velocity wb from joint state (qm, qd) via SPART dynamics."""
-        R0 = self.R0
-        r0 = self.r0
+        runtime = self._get_runtime_constants(qm.dtype)
+        R0 = runtime["R0"]
+        r0 = runtime["r0"]
         RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, self.robot)
         Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, self.robot)
         I0, Im = spart.inertia_projection(R0, RL, self.robot)
@@ -321,28 +382,23 @@ class PhysicsLayer:
         H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot)
 
         rhs = -H0m @ qd
-        H0_damped = H0 + self._damping_term
+        H0_damped = H0 + runtime["damping_term"]
         u0_sol = torch.linalg.solve(H0_damped, rhs)
         return u0_sol[:3]  # Angular Velocity part
 
     # ------------------------------------------------------------------
-    # 핵심 시뮬레이션 (회전행렬 기반, RK4 적분)
+    # 핵심 시뮬레이션 (회전행렬 기반, Euler 적분)
     # ------------------------------------------------------------------
     def simulate_single(self, q_traj, q_dot_traj, q0_init, q0_goal):
         """
-        [Core Physics Engine - Rotation Matrix + Lie Group RK4]
+        [Core Physics Engine - Rotation Matrix + Euler Integration]
 
-        각 타임스텝에서 RK4로 각속도(wb)를 합성한 뒤 exponential map으로
-        회전행렬을 업데이트. SO(3) manifold 위에서 적분하므로
-        re-orthogonalization이 필요 없고 gradient가 안정적.
+        각 타임스텝에서 각속도(wb)를 구한 뒤 exponential map으로
+        회전행렬을 업데이트. SO(3) manifold 위에서 적분.
 
-        RK4 on angular velocity:
-          k1 = wb(qm_t, qd_t)
-          k2 = wb(qm_mid, qd_mid)   (midpoint input)
-          k3 = wb(qm_mid, qd_mid)   (midpoint input)
-          k4 = wb(qm_next, qd_next) (next step input)
-          wb_eff = (k1 + 2*k2 + 2*k3 + k4) / 6
-          R_{t+1} = R_t @ exp(skew(wb_eff * dt))
+        Euler:
+          wb = compute_wb(qm_t, qd_t)
+          R_{t+1} = R_t @ exp(skew(wb * dt))
         """
         R_init = self._quat_to_rot(q0_init)
         R_goal = self._quat_to_rot(q0_goal)
@@ -354,32 +410,8 @@ class PhysicsLayer:
         R_curr = R_init
 
         for t in range(num_steps):
-            qm_t = q_traj[t]
-            qd_t = q_dot_traj[t]
-
-            # Interpolated inputs at half-step and full-step
-            if t < num_steps - 1:
-                qm_mid = 0.5 * (q_traj[t] + q_traj[t + 1])
-                qd_mid = 0.5 * (q_dot_traj[t] + q_dot_traj[t + 1])
-                qm_next = q_traj[t + 1]
-                qd_next = q_dot_traj[t + 1]
-            else:
-                qm_mid = qm_t
-                qd_mid = qd_t
-                qm_next = qm_t
-                qd_next = qd_t
-
-            # RK4 stages on angular velocity
-            k1 = self._compute_wb(qm_t, qd_t)
-            k2 = self._compute_wb(qm_mid, qd_mid)
-            k3 = self._compute_wb(qm_mid, qd_mid)
-            k4 = self._compute_wb(qm_next, qd_next)
-
-            # RK4 combined effective angular velocity
-            wb_eff = (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
-
-            # Apply rotation via exponential map (Rodrigues)
-            R_delta = self._rot_from_omega(wb_eff, dt)
+            wb = self._compute_wb(q_traj[t], q_dot_traj[t])
+            R_delta = self._rot_from_omega(wb, dt)
             R_curr = R_curr @ R_delta
 
         # --- Final Orientation Error ---
@@ -525,9 +557,7 @@ class PhysicsLayer:
         q_traj, q_dot_traj = self.generate_trajectory(waypoints_flat, q_start=q_start_joint, q_end=q_end_joint)
 
         # simulate_single 을 배치 차원에 대해 병렬화
-        batch_sim_fn = vmap(self.simulate_single, in_dims=(0, 0, 0, 0))
-        # Now returns (loss_batch, final_q_batch)
-        loss_batch, _ = batch_sim_fn(q_traj, q_dot_traj, q0_init, q0_goal)
+        loss_batch, _ = self._batch_sim_fn(q_traj, q_dot_traj, q0_init, q0_goal)
         return loss_batch.mean()
 
     def calculate_total_loss(self, waypoints_flat, q0_init, q0_goal, 
@@ -558,8 +588,7 @@ class PhysicsLayer:
         """
         # Physics loss (per sample)
         q_traj, q_dot_traj = self.generate_trajectory(waypoints_flat, q_start=q_start_joint, q_end=q_end_joint)
-        batch_sim_fn = vmap(self.simulate_single, in_dims=(0, 0, 0, 0))
-        physics_loss_batch, _ = batch_sim_fn(q_traj, q_dot_traj, q0_init, q0_goal)  # [batch_size]
+        physics_loss_batch, _ = self._batch_sim_fn(q_traj, q_dot_traj, q0_init, q0_goal)  # [batch_size]
         
         # Reshape waypoints
         batch_size = waypoints_flat.size(0)
@@ -607,7 +636,145 @@ class PhysicsLayer:
             'max_joint_penalty': max_joint_penalty,
             'total_loss': total_loss
         }
-        
+
         return total_loss, loss_dict
+
+    # ------------------------------------------------------------------
+    # SO(3) error vector (for Newton correction / null-space optimization)
+    # ------------------------------------------------------------------
+    def simulate_single_error_vec(self, q_traj, q_dot_traj, q0_init, q0_goal):
+        """
+        Simulate trajectory and return 3D SO(3) error vector (log map).
+
+        Returns:
+            error_vec: [3] rotation vector representing R_goal^T @ R_final
+                       (zero when orientation is achieved)
+        """
+        R_init = self._quat_to_rot(q0_init)
+        R_goal = self._quat_to_rot(q0_goal)
+        R_curr = R_init
+
+        for t in range(self.num_steps):
+            wb = self._compute_wb(q_traj[t], q_dot_traj[t])
+            R_delta = self._rot_from_omega(wb, self.dt)
+            R_curr = R_curr @ R_delta
+
+        R_err = R_goal.T @ R_curr
+        return _so3_log_standalone(R_err)
+
+    # ------------------------------------------------------------------
+    # Torque computation & cost  (inertia + Coriolis/centrifugal)
+    # ------------------------------------------------------------------
+    def _compute_tau_single_step(self, qm, qd, qdd, runtime):
+        """
+        Compute joint torque at a single timestep.
+
+        Full EOM (free-floating base, no external force on base):
+          H0  ü0  + H0m  q̈m + C0  u0 + C0m q̇m = 0   … (base)
+          H0m'ü0  + Hm   q̈m + Cm0 u0 + Cm  q̇m = τ   … (joints)
+
+        Eliminate ü0 from base row:
+          ü0 = -H0⁻¹ (H0m q̈m + C0 u0 + C0m q̇m)
+
+        Substitute into joint row:
+          τ = (Hm  - H0m' H0⁻¹ H0m ) q̈m        … inertia
+            + (Cm  - H0m' H0⁻¹ C0m ) q̇m        … Coriolis (joint)
+            + (Cm0 - H0m' H0⁻¹ C0  ) u0         … Coriolis (base-coupling)
+
+        u0 is obtained from momentum conservation: u0 = -H0⁻¹ H0m q̇m
+        """
+        R0 = runtime["R0"]
+        r0 = runtime["r0"]
+        damping = runtime["damping_term"]
+
+        # --- kinematics & inertia ---
+        RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, self.robot)
+        Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, self.robot)
+        I0, Im = spart.inertia_projection(R0, RL, self.robot)
+        M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, self.robot)
+        H0, H0m, Hm = spart.generalized_inertia_matrix(
+            M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot
+        )
+
+        H0_damped = H0 + damping
+        H0_inv = torch.linalg.inv(H0_damped)         # [6, 6]
+        H0_inv_H0m = H0_inv @ H0m                    # [6, n_q]
+
+        # --- base velocity (momentum conservation) ---
+        u0 = -(H0_inv_H0m @ qd)                      # [6]
+
+        # --- link twists (needed for Coriolis) ---
+        t0, tL = spart.velocities(Bij, Bi0, P0, pm, u0, qd, self.robot)
+
+        # --- Coriolis / centrifugal matrices ---
+        C0, C0m, Cm0, Cm = spart.convective_inertia_matrix(
+            t0, tL, I0, Im, M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot
+        )
+
+        # --- torque ---
+        H0m_T = H0m.T                                # [n_q, 6]
+        H0m_T_H0inv = H0m_T @ H0_inv                 # [n_q, 6]
+
+        tau_inertia  = (Hm  - H0m_T_H0inv @ H0m ) @ qdd
+        tau_cor_joint = (Cm  - H0m_T_H0inv @ C0m ) @ qd
+        tau_cor_base  = (Cm0 - H0m_T_H0inv @ C0  ) @ u0
+
+        return tau_inertia + tau_cor_joint + tau_cor_base
+
+    def compute_torque_cost(self, q_traj, q_dot_traj):
+        """
+        Compute quadratic torque cost:  cost = Σ_t ||τ_t||²
+
+        Includes inertia + Coriolis/centrifugal terms.
+
+        Args:
+            q_traj: [num_steps, n_q]
+            q_dot_traj: [num_steps, n_q]
+        Returns:
+            torque_cost: scalar
+        """
+        runtime = self._get_runtime_constants(q_traj.dtype)
+
+        # q_ddot via finite difference
+        q_ddot = torch.zeros_like(q_dot_traj)
+        q_ddot[:-1] = (q_dot_traj[1:] - q_dot_traj[:-1]) / self.dt
+        if self.num_steps > 1:
+            q_ddot[-1] = q_ddot[-2]
+
+        torque_cost = q_traj.new_zeros(())
+        for t in range(self.num_steps):
+            tau = self._compute_tau_single_step(
+                q_traj[t], q_dot_traj[t], q_ddot[t], runtime
+            )
+            torque_cost = torque_cost + (tau * tau).sum()
+
+        return torque_cost
+
+    def compute_torques(self, q_traj, q_dot_traj):
+        """
+        Compute joint torque profile for a single trajectory.
+
+        Includes inertia + Coriolis/centrifugal terms.
+
+        Args:
+            q_traj: [num_steps, n_q]
+            q_dot_traj: [num_steps, n_q]
+        Returns:
+            torques: [num_steps, n_q]
+        """
+        runtime = self._get_runtime_constants(q_traj.dtype)
+
+        q_ddot = torch.zeros_like(q_dot_traj)
+        q_ddot[:-1] = (q_dot_traj[1:] - q_dot_traj[:-1]) / self.dt
+        if self.num_steps > 1:
+            q_ddot[-1] = q_ddot[-2]
+
+        torques = torch.zeros_like(q_traj)
+        for t in range(self.num_steps):
+            torques[t] = self._compute_tau_single_step(
+                q_traj[t], q_dot_traj[t], q_ddot[t], runtime
+            )
+
+        return torques
 
 

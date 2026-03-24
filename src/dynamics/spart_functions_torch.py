@@ -45,6 +45,31 @@ r_com : [3x1] Center of mass (CoM) position of the entire system, projected in t
 """
 
 
+def _get_runtime_stacked_cache(robot, device):
+    stk = robot['stacked']
+    runtime_cache = stk.setdefault('_runtime_cache', {})
+    cache_key = str(device)
+    cached = runtime_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    joint_types = torch.tensor(stk['joint_types'], device=device, dtype=torch.long)
+    joint_q_ids = torch.tensor(stk['joint_q_ids'], device=device, dtype=torch.long) - 1
+    active_mask = joint_types != 0
+    active_indices = torch.nonzero(active_mask, as_tuple=True)[0]
+    active_q_ids = joint_q_ids.index_select(0, active_indices)
+
+    cached = {
+        'joint_types_tensor': joint_types,
+        'revolute_mask': joint_types == 1,
+        'prismatic_mask': joint_types == 2,
+        'active_indices': active_indices,
+        'active_q_ids': active_q_ids,
+    }
+    runtime_cache[cache_key] = cached
+    return cached
+
+
 def skew_symmetric(v):
     # Ensure v is a tensor on the correct device/dtype
     v = torch.as_tensor(v)
@@ -314,6 +339,7 @@ def diff_kinematics(R0, r0, rL, e, g, robot):
     n = robot['n_links_joints']
     device = R0.device
     dtype = R0.dtype
+    runtime_cache = _get_runtime_stacked_cache(robot, device)
     
     # 1. P0 (unchanged)
     zeros_33 = torch.zeros((3, 3), device=device, dtype=dtype)
@@ -424,39 +450,11 @@ def diff_kinematics(R0, r0, rL, e, g, robot):
 
     # Build pm based on joint types using pre-computed masks
     # For revolute: pm = [e, cross(e,g)], for prismatic: pm = [0, e], for fixed: pm = 0
-    joint_types = robot['stacked']['joint_types']
-
-    # Start with zeros
-    pm = torch.zeros((6, n), device=device, dtype=dtype)
-
-    # Build revolute and prismatic contributions without loop
-    # Since joint_types is a Python list of ints (static per robot), we can use index lists
-    rev_idx = [i for i, t in enumerate(joint_types) if t == 1]
-    pri_idx = [i for i, t in enumerate(joint_types) if t == 2]
-
-    if rev_idx:
-        pm_rev = torch.cat([e[:, rev_idx], cross_eg[:, rev_idx]], dim=0)  # [6, n_rev]
-        # Scatter back — use list indexing (vmap-safe, no in-place on pm)
-        pm_parts = []
-        rev_set = set(rev_idx)
-        pri_set = set(pri_idx)
-        for i in range(n):
-            if i in rev_set:
-                pm_parts.append(torch.cat([e[:, i], cross_eg[:, i]], dim=0))
-            elif i in pri_set:
-                pm_parts.append(torch.cat([torch.zeros(3, device=device, dtype=dtype), e[:, i]], dim=0))
-            else:
-                pm_parts.append(torch.zeros(6, device=device, dtype=dtype))
-        pm = torch.stack(pm_parts, dim=1)  # [6, n]
-    elif pri_idx:
-        pm_parts = []
-        pri_set = set(pri_idx)
-        for i in range(n):
-            if i in pri_set:
-                pm_parts.append(torch.cat([torch.zeros(3, device=device, dtype=dtype), e[:, i]], dim=0))
-            else:
-                pm_parts.append(torch.zeros(6, device=device, dtype=dtype))
-        pm = torch.stack(pm_parts, dim=1)
+    rev_mask = runtime_cache['revolute_mask'].to(dtype=dtype)
+    pri_mask = runtime_cache['prismatic_mask'].to(dtype=dtype)
+    pm_top = e * rev_mask.unsqueeze(0)
+    pm_bottom = cross_eg * rev_mask.unsqueeze(0) + e * pri_mask.unsqueeze(0)
+    pm = torch.cat([pm_top, pm_bottom], dim=0)
 
     return Bij, Bi0, P0, pm
 
@@ -636,35 +634,24 @@ def generalized_inertia_matrix(M0_tilde, Mm_tilde, Bij, Bi0, P0, pm, robot):
     Vectorized generalized_inertia_matrix - vmap compatible
     """
     n_q = robot['n_q']
-    n = robot['n_links_joints']
     device = M0_tilde.device
     dtype = M0_tilde.dtype
+    runtime_cache = _get_runtime_stacked_cache(robot, device)
     
     H0 = P0.T @ M0_tilde @ P0
     
-    # Pre-compute q_id mappings for active joints
-    active_indices = []
-    q_ids = []
-    
-    for i in range(n):
-        if robot['joints'][i]['type'] != 0:
-            active_indices.append(i)
-            q_ids.append(robot['joints'][i]['q_id'] - 1)
-            
-    num_active = len(active_indices)
+    active_idx_tensor = runtime_cache['active_indices']
+    num_active = active_idx_tensor.numel()
     
     # If no active joints, return zeros
     if num_active == 0:
         return H0, torch.zeros((6, n_q), device=device, dtype=dtype), torch.zeros((n_q, n_q), device=device, dtype=dtype)
     
-    active_idx_tensor = torch.tensor(active_indices, device=device, dtype=torch.long)
-    # q_idx_tensor not needed for loop construction, but good for reference
-    
     # Gather pm columns: [6, num_active]
-    pm_active = pm[:, active_idx_tensor] 
+    pm_active = torch.index_select(pm, 1, active_idx_tensor)
     
     # Gather Mm_tilde blocks: [6, 6, num_active]
-    Mm_tilde_active = Mm_tilde[:, :, active_idx_tensor]
+    Mm_tilde_active = torch.index_select(Mm_tilde, 2, active_idx_tensor)
     
     # Gather Bij blocks: [6, 6, num_active, num_active]
     grid_i, grid_j = torch.meshgrid(active_idx_tensor, active_idx_tensor, indexing='ij')
@@ -678,67 +665,16 @@ def generalized_inertia_matrix(M0_tilde, Mm_tilde, Bij, Bi0, P0, pm, robot):
     # Symmetrize
     diagonal = torch.diagonal(Hm_dense)
     Hm_dense_sym = Hm_dense + Hm_dense.T - torch.diag(diagonal)
-    
-    # === vmap-compatible Hm construction ===
-    # Check if q_ids are contiguous 0..n_q-1
-    is_contiguous = (num_active == n_q)
-    if is_contiguous:
-        for i in range(num_active):
-            if q_ids[i] != i:
-                is_contiguous = False
-                break
-    
-    if is_contiguous:
-        # q_ids are [0, 1, 2, ..., n_q-1] in order - direct use
-        Hm = Hm_dense_sym
-    else:
-        # Need to scatter - build using loops (vmap-safe since no in-place)
-        Hm_rows = []
-        for r in range(n_q):
-            Hm_cols = []
-            for c in range(n_q):
-                # Find if (r, c) maps to any (q_ids[i], q_ids[j])
-                val = torch.zeros(1, device=device, dtype=dtype)
-                
-                # Manual search to avoid advanced indexing inside loop which might confuse vmap
-                # But since q_ids is constant per robot structure, we could optimize this outside vmap?
-                # robot struct is passed in.
-                
-                found = False
-                for i_idx, qi in enumerate(q_ids):
-                    if qi == r:
-                        for j_idx, qj in enumerate(q_ids):
-                            if qj == c:
-                                val = Hm_dense_sym[i_idx, j_idx].unsqueeze(0)
-                                found = True
-                                break
-                    if found: break
-                
-                Hm_cols.append(val)
-            Hm_rows.append(torch.cat(Hm_cols, dim=0))
-        Hm = torch.stack(Hm_rows, dim=0)
-    
-    # === vmap-compatible H0m construction ===
-    Bi0_active = Bi0[:, :, active_idx_tensor]
+    selector = torch.nn.functional.one_hot(
+        runtime_cache['active_q_ids'],
+        num_classes=n_q
+    ).to(dtype=dtype)
+    Hm = selector.T @ Hm_dense_sym @ selector
+
+    Bi0_active = torch.index_select(Bi0, 2, active_idx_tensor)
     term1 = torch.einsum('mnk,mk->nk', Bi0_active, Mm_pm)
     H0m_dense = P0.T @ term1  # [6, num_active]
-    
-    if is_contiguous:
-        # Direct use
-        H0m = H0m_dense
-    else:
-        # Build column by column
-        H0m_cols = []
-        for c in range(n_q):
-            found = False
-            for i_idx, qi in enumerate(q_ids):
-                if qi == c:
-                    H0m_cols.append(H0m_dense[:, i_idx])
-                    found = True
-                    break
-            if not found:
-                H0m_cols.append(torch.zeros(6, device=device, dtype=dtype))
-        H0m = torch.stack(H0m_cols, dim=1)
+    H0m = H0m_dense @ selector
     
     return H0, H0m, Hm
 
