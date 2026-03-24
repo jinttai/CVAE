@@ -167,9 +167,13 @@ def accelerations(t0, tL, P0, pm, Bi0, Bij, u0, um, u0dot, umdot, robot):
     device = t0.device
     dtype = t0.dtype
     
-    # Omega0 block
-    Omega0 = torch.zeros((6, 6), device=device, dtype=dtype)
-    Omega0[:3, :3] = skew_symmetric(t0[:3])
+    # Omega0 block (vmap-safe, no in-place)
+    _skew_t0 = skew_symmetric(t0[:3])
+    _z33 = torch.zeros((3, 3), device=device, dtype=dtype)
+    Omega0 = torch.cat([
+        torch.cat([_skew_t0, _z33], dim=1),
+        torch.cat([_z33, _z33], dim=1)
+    ], dim=0)
     
     Omegam_list = []
     for i in range(n):
@@ -684,9 +688,13 @@ def convective_inertia_matrix(t0, tL, I0, Im, M0_tilde, Mm_tilde, Bij, Bi0, P0, 
     device = t0.device
     dtype = t0.dtype
     
-    # Omega0 block
-    Omega0 = torch.zeros((6, 6), device=device, dtype=dtype)
-    Omega0[:3, :3] = skew_symmetric(t0[:3])
+    # Omega0 block (vmap-safe, no in-place)
+    _skew_t0 = skew_symmetric(t0[:3])
+    _z33 = torch.zeros((3, 3), device=device, dtype=dtype)
+    Omega0 = torch.cat([
+        torch.cat([_skew_t0, _z33], dim=1),
+        torch.cat([_z33, _z33], dim=1)
+    ], dim=0)
     
     Omega_list = []
     zeros = torch.zeros((3, 3), device=device, dtype=dtype)

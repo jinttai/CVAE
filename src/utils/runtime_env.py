@@ -6,6 +6,9 @@ def configure_windows_runtime():
     if sys.platform != "win32":
         return
 
+    # Must be set before numpy/torch import to avoid libiomp5md.dll clash
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
     thread_defaults = {
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
@@ -13,7 +16,3 @@ def configure_windows_runtime():
     }
     for key, value in thread_defaults.items():
         os.environ.setdefault(key, value)
-
-    # Do not keep the unsafe duplicate-OpenMP override enabled.
-    if os.environ.get("KMP_DUPLICATE_LIB_OK", "").upper() == "TRUE":
-        os.environ.pop("KMP_DUPLICATE_LIB_OK", None)

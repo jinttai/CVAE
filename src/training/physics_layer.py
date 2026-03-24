@@ -256,18 +256,14 @@ class PhysicsLayer:
 
     def _skew(self, v):
         """
-        3D 벡터 v에 대한 skew-symmetric 행렬 [v]_x
+        3D 벡터 v에 대한 skew-symmetric 행렬 [v]_x (vmap-safe, no in-place)
         """
-        vx, vy, vz = v
-        # Allocate using v's device/dtype without constructing a new Python list tensor
-        M = v.new_zeros(3, 3)
-        M[0, 1] = -vz
-        M[0, 2] = vy
-        M[1, 0] = vz
-        M[1, 2] = -vx
-        M[2, 0] = -vy
-        M[2, 1] = vx
-        return M
+        vx, vy, vz = v[0], v[1], v[2]
+        zero = torch.zeros_like(vx)
+        row0 = torch.stack([zero, -vz, vy])
+        row1 = torch.stack([vz, zero, -vx])
+        row2 = torch.stack([-vy, vx, zero])
+        return torch.stack([row0, row1, row2])
 
     def _rot_from_omega(self, wb, dt):
         """
@@ -393,26 +389,28 @@ class PhysicsLayer:
         """
         [Core Physics Engine - Rotation Matrix + Euler Integration]
 
-        각 타임스텝에서 각속도(wb)를 구한 뒤 exponential map으로
-        회전행렬을 업데이트. SO(3) manifold 위에서 적분.
+        vmap으로 100 timestep의 wb를 한 번에 계산한 뒤,
+        순차적으로 R을 누적 (3x3 matmul만, 거의 공짜).
 
         Euler:
-          wb = compute_wb(qm_t, qd_t)
-          R_{t+1} = R_t @ exp(skew(wb * dt))
+          wb_all = vmap(compute_wb)(q_traj, q_dot_traj)  # [T, 3]
+          R_{t+1} = R_t @ exp(skew(wb_t * dt))
         """
         R_init = self._quat_to_rot(q0_init)
         R_goal = self._quat_to_rot(q0_goal)
 
         dt = self.dt
-        num_steps = self.num_steps
 
-        # q_traj: [num_steps, n_q], q_dot_traj: [num_steps, n_q]
+        # Batch wb computation: [num_steps, n_q] -> [num_steps, 3]
+        all_wb = vmap(self._compute_wb)(q_traj, q_dot_traj)
+
+        # Batch R_delta computation: [num_steps, 3] -> [num_steps, 3, 3]
+        all_R_delta = vmap(lambda w: self._rot_from_omega(w, dt))(all_wb)
+
+        # Sequential R accumulation (cheap 3x3 matmul)
         R_curr = R_init
-
-        for t in range(num_steps):
-            wb = self._compute_wb(q_traj[t], q_dot_traj[t])
-            R_delta = self._rot_from_omega(wb, dt)
-            R_curr = R_curr @ R_delta
+        for t in range(self.num_steps):
+            R_curr = R_curr @ all_R_delta[t]
 
         # --- Final Orientation Error ---
         R_diff = R_curr - R_goal
@@ -645,6 +643,7 @@ class PhysicsLayer:
     def simulate_single_error_vec(self, q_traj, q_dot_traj, q0_init, q0_goal):
         """
         Simulate trajectory and return 3D SO(3) error vector (log map).
+        vmap으로 wb를 배치 계산.
 
         Returns:
             error_vec: [3] rotation vector representing R_goal^T @ R_final
@@ -652,12 +651,14 @@ class PhysicsLayer:
         """
         R_init = self._quat_to_rot(q0_init)
         R_goal = self._quat_to_rot(q0_goal)
-        R_curr = R_init
 
+        dt = self.dt
+        all_wb = vmap(self._compute_wb)(q_traj, q_dot_traj)
+        all_R_delta = vmap(lambda w: self._rot_from_omega(w, dt))(all_wb)
+
+        R_curr = R_init
         for t in range(self.num_steps):
-            wb = self._compute_wb(q_traj[t], q_dot_traj[t])
-            R_delta = self._rot_from_omega(wb, self.dt)
-            R_curr = R_curr @ R_delta
+            R_curr = R_curr @ all_R_delta[t]
 
         R_err = R_goal.T @ R_curr
         return _so3_log_standalone(R_err)
@@ -726,6 +727,7 @@ class PhysicsLayer:
         Compute quadratic torque cost:  cost = Σ_t ||τ_t||²
 
         Includes inertia + Coriolis/centrifugal terms.
+        vmap으로 100 timestep의 tau를 한 번에 계산.
 
         Args:
             q_traj: [num_steps, n_q]
@@ -741,20 +743,19 @@ class PhysicsLayer:
         if self.num_steps > 1:
             q_ddot[-1] = q_ddot[-2]
 
-        torque_cost = q_traj.new_zeros(())
-        for t in range(self.num_steps):
-            tau = self._compute_tau_single_step(
-                q_traj[t], q_dot_traj[t], q_ddot[t], runtime
-            )
-            torque_cost = torque_cost + (tau * tau).sum()
+        # Batch all tau at once: [T, n_q]
+        all_tau = vmap(
+            lambda qm, qd, qdd: self._compute_tau_single_step(qm, qd, qdd, runtime)
+        )(q_traj, q_dot_traj, q_ddot)
 
-        return torque_cost
+        return (all_tau * all_tau).sum()
 
     def compute_torques(self, q_traj, q_dot_traj):
         """
         Compute joint torque profile for a single trajectory.
 
         Includes inertia + Coriolis/centrifugal terms.
+        vmap으로 100 timestep 배치 계산.
 
         Args:
             q_traj: [num_steps, n_q]
@@ -769,12 +770,8 @@ class PhysicsLayer:
         if self.num_steps > 1:
             q_ddot[-1] = q_ddot[-2]
 
-        torques = torch.zeros_like(q_traj)
-        for t in range(self.num_steps):
-            torques[t] = self._compute_tau_single_step(
-                q_traj[t], q_dot_traj[t], q_ddot[t], runtime
-            )
-
-        return torques
+        return vmap(
+            lambda qm, qd, qdd: self._compute_tau_single_step(qm, qd, qdd, runtime)
+        )(q_traj, q_dot_traj, q_ddot)
 
 
