@@ -308,74 +308,87 @@ class PhysicsLayer:
         return q_out
 
     # ------------------------------------------------------------------
-    # 핵심 시뮬레이션 (회전행렬 기반)
+    # SPART dynamics → angular velocity
+    # ------------------------------------------------------------------
+    def _compute_wb(self, qm, qd):
+        """Compute angular velocity wb from joint state (qm, qd) via SPART dynamics."""
+        R0 = self.R0
+        r0 = self.r0
+        RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, self.robot)
+        Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, self.robot)
+        I0, Im = spart.inertia_projection(R0, RL, self.robot)
+        M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, self.robot)
+        H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot)
+
+        rhs = -H0m @ qd
+        H0_damped = H0 + self._damping_term
+        u0_sol = torch.linalg.solve(H0_damped, rhs)
+        return u0_sol[:3]  # Angular Velocity part
+
+    # ------------------------------------------------------------------
+    # 핵심 시뮬레이션 (회전행렬 기반, RK4 적분)
     # ------------------------------------------------------------------
     def simulate_single(self, q_traj, q_dot_traj, q0_init, q0_goal):
         """
-        [Core Physics Engine - Rotation Matrix Version - Vectorized]
-        
-        Vectorized version: 모든 step의 rotation matrix를 한번에 계산하고
-        cumulative product로 최종 rotation을 구함 (for문 없이 구현)
+        [Core Physics Engine - Rotation Matrix + Lie Group RK4]
 
-        - 각 스텝에서 SPART 동역학을 통해 각속도 wb 를 구함
-        - 회전행렬 R 를 R_{k+1} = R_k @ R_delta(wb, dt) 로 업데이트
-        - 최종 R 와 목표 쿼터니언 q0_goal 을 회전행렬로 변환한 R_goal 간의
-          각도 오차를 반환: log(epsilon + 1/2 * trace((Q - Q_d)^T * (Q - Q_d)))
+        각 타임스텝에서 RK4로 각속도(wb)를 합성한 뒤 exponential map으로
+        회전행렬을 업데이트. SO(3) manifold 위에서 적분하므로
+        re-orthogonalization이 필요 없고 gradient가 안정적.
+
+        RK4 on angular velocity:
+          k1 = wb(qm_t, qd_t)
+          k2 = wb(qm_mid, qd_mid)   (midpoint input)
+          k3 = wb(qm_mid, qd_mid)   (midpoint input)
+          k4 = wb(qm_next, qd_next) (next step input)
+          wb_eff = (k1 + 2*k2 + 2*k3 + k4) / 6
+          R_{t+1} = R_t @ exp(skew(wb_eff * dt))
         """
-        # 기준 좌표계 (사전 생성된 텐서 사용)
-        R0 = self.R0
-        r0 = self.r0
-
-        # 초기/목표 자세를 회전행렬로 변환
         R_init = self._quat_to_rot(q0_init)
         R_goal = self._quat_to_rot(q0_goal)
 
-        # Vectorized: 모든 step의 wb를 한번에 계산
-        # q_traj: [num_steps, n_q], q_dot_traj: [num_steps, n_q]
-        
-        # 모든 step에 대해 SPART 동역학 계산 및 wb 계산
-        # vmap을 사용하여 각 step을 병렬 처리
-        def compute_wb_single_step(qm, qd):
-            """Single step의 wb 계산"""
-            # --- 1. SPART Dynamics Calculations ---
-            RJ, RL, rJ, rL, e, g = spart.kinematics(R0, r0, qm, self.robot)
-            Bij, Bi0, P0, pm = spart.diff_kinematics(R0, r0, rL, e, g, self.robot)
-            I0, Im = spart.inertia_projection(R0, RL, self.robot)
-            M0_t, Mm_t = spart.mass_composite_body(I0, Im, Bij, Bi0, self.robot)
-            H0, H0m, _ = spart.generalized_inertia_matrix(M0_t, Mm_t, Bij, Bi0, P0, pm, self.robot)
+        dt = self.dt
+        num_steps = self.num_steps
 
-            # --- 2. Non-holonomic Constraint Solver ---
-            rhs = -H0m @ qd
-            H0_damped = H0 + self._damping_term
-            u0_sol = torch.linalg.solve(H0_damped, rhs)
-            wb = u0_sol[:3]  # Angular Velocity part
-            return wb
-        
-        # vmap으로 모든 step을 병렬 처리
-        batch_compute_wb = vmap(compute_wb_single_step, in_dims=(0, 0))
-        wb_all = batch_compute_wb(q_traj, q_dot_traj)  # [num_steps, 3]
-        
-        # 모든 step의 R_delta를 한번에 계산
-        batch_rot_from_omega = vmap(self._rot_from_omega, in_dims=(0, None))
-        R_delta_all = batch_rot_from_omega(wb_all, self.dt)  # [num_steps, 3, 3]
-        
-        # Cumulative product: R_final = R_init @ R_delta[0] @ R_delta[1] @ ... @ R_delta[n-1]
-        # 순서가 중요: 왼쪽부터 곱해야 함 (순차적 버전과 동일)
-        # R_curr = R_init @ R_delta[0] @ R_delta[1] @ ... @ R_delta[n-1]
+        # q_traj: [num_steps, n_q], q_dot_traj: [num_steps, n_q]
         R_curr = R_init
-        for t in range(self.num_steps):
-            R_curr = R_curr @ R_delta_all[t]
-        
-        # --- 4. Final Orientation Error ---
-        # Angle error loss: log(epsilon + 1/2 * trace((Q - Q_d)^T * (Q - Q_d)))
-        R_diff = R_curr - R_goal  # [3, 3]
-        R_diff_T = R_diff.T  # [3, 3]
-        R_diff_sq = R_diff_T @ R_diff  # [3, 3]
+
+        for t in range(num_steps):
+            qm_t = q_traj[t]
+            qd_t = q_dot_traj[t]
+
+            # Interpolated inputs at half-step and full-step
+            if t < num_steps - 1:
+                qm_mid = 0.5 * (q_traj[t] + q_traj[t + 1])
+                qd_mid = 0.5 * (q_dot_traj[t] + q_dot_traj[t + 1])
+                qm_next = q_traj[t + 1]
+                qd_next = q_dot_traj[t + 1]
+            else:
+                qm_mid = qm_t
+                qd_mid = qd_t
+                qm_next = qm_t
+                qd_next = qd_t
+
+            # RK4 stages on angular velocity
+            k1 = self._compute_wb(qm_t, qd_t)
+            k2 = self._compute_wb(qm_mid, qd_mid)
+            k3 = self._compute_wb(qm_mid, qd_mid)
+            k4 = self._compute_wb(qm_next, qd_next)
+
+            # RK4 combined effective angular velocity
+            wb_eff = (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+
+            # Apply rotation via exponential map (Rodrigues)
+            R_delta = self._rot_from_omega(wb_eff, dt)
+            R_curr = R_curr @ R_delta
+
+        # --- Final Orientation Error ---
+        R_diff = R_curr - R_goal
+        R_diff_sq = R_diff.T @ R_diff
         trace_val = 0.5 * torch.trace(R_diff_sq)
         epsilon = 1e-8
         loss = torch.log(epsilon + trace_val)
-        
-        # Return final quaternion as well
+
         q_final = self._rot_to_quat(R_curr)
         return loss, q_final
 
