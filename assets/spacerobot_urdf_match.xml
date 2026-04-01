@@ -1,0 +1,75 @@
+<mujoco model="spacerobot_urdf_match">
+  <compiler angle="radian"/>
+  <option cone="elliptic" gravity="0 0 0" impratio="5" timestep="0.01" tolerance="1e-10" />
+
+  <worldbody>
+    <body name="base_link" pos="0 0 0">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="104" diaginertia="16.676106 16.676106 16.67125"/>
+      <geom size="0.5 0.5 0.5" type="box" contype="2" conaffinity="1" group="1" density="0" rgba="0.7 0.7 0.7 1"/>
+
+      <!-- shoulder_pan_joint: xyz="0 0 0.581" rpy="0 0 0", axis="0 0 1" -->
+      <body name="shoulder_link" pos="0 0 0.581">
+        <inertial pos="0 0 0" mass="7.778" diaginertia="0.0315 0.0315 0.02188"/>
+        <joint name="shoulder_pan_joint" axis="0 0 1" range="-100 100" actuatorfrcrange="-330 330"/>
+
+        <!-- shoulder_lift_joint: xyz="0 0.176 0" rpy="0 0 0", axis="0 1 0"
+             URDF has NO rotation here. Original XML had spurious quat removed. -->
+        <body name="upper_arm_link" pos="0 0.176 0">
+          <inertial pos="0 0 0.3065" mass="12.93" diaginertia="0.42307 0.42307 0.0364"/>
+          <joint name="shoulder_lift_joint" axis="0 1 0" range="-100 100" actuatorfrcrange="-330 330"/>
+
+          <!-- elbow_joint: xyz="0 -0.137 0.613" rpy="0 0 0", axis="0 1 0" -->
+          <body name="forearm_link" pos="0 -0.137 0.613">
+            <inertial pos="0 0 0.2855" mass="3.87" diaginertia="0.11059 0.11059 0.01088"/>
+            <joint name="elbow_joint" axis="0 1 0" range="-100 100" actuatorfrcrange="-150 150"/>
+
+            <!-- wrist_1_joint: xyz="0 0 0.571" rpy="0 1.5708 0", axis="0 1 0"
+                 URDF HAS 90deg Y rotation here. -->
+            <body name="wrist_1_link" pos="0 0 0.571" quat="0.707107 0 0.707107 0">
+              <inertial pos="0 0.135 0" mass="1.96" diaginertia="0.005108 0.005108 0.0055125"/>
+              <joint name="wrist_1_joint" axis="0 1 0" range="-100 100" actuatorfrcrange="-54 54"/>
+
+              <!-- wrist_2_joint: xyz="0 0.135 0" rpy="0 0 0", axis="0 0 1" -->
+              <body name="wrist_2_link" pos="0 0.135 0">
+                <inertial pos="0 0 0.12" mass="1.96" diaginertia="0.005108 0.005108 0.0055125"/>
+                <joint name="wrist_2_joint" axis="0 0 1" range="-100 100" actuatorfrcrange="-54 54"/>
+
+                <!-- wrist_3_joint: xyz="0 0 0.12" rpy="0 0 0", axis="0 1 0" -->
+                <body name="wrist_3_link" pos="0 0 0.12">
+                  <inertial pos="0 0.092 0" quat="0.7071068 0.7071068 0 0" mass="10.202" diaginertia="0.010144 0.010144 0.010205"/>
+                  <joint name="wrist_3_joint" axis="0 1 0" range="-100 100" actuatorfrcrange="-54 54"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <general ctrllimited="true" ctrlrange="-330 330" forcelimited="true" forcerange="-330 330" joint="shoulder_pan_joint" name="shoulder_pan_T"/>
+    <general ctrllimited="true" ctrlrange="-330 330" forcelimited="true" forcerange="-330 330" joint="shoulder_lift_joint" name="shoulder_lift_T"/>
+    <general ctrllimited="true" ctrlrange="-150 150" forcelimited="true" forcerange="-150 150" joint="elbow_joint" name="elbow_T"/>
+    <general ctrllimited="true" ctrlrange="-54 54" forcelimited="true" forcerange="-54 54" joint="wrist_1_joint" name="wrist_1_T"/>
+    <general ctrllimited="true" ctrlrange="-54 54" forcelimited="true" forcerange="-54 54" joint="wrist_2_joint" name="wrist_2_T"/>
+    <general ctrllimited="true" ctrlrange="-54 54" forcelimited="true" forcerange="-54 54" joint="wrist_3_joint" name="wrist_3_T"/>
+  </actuator>
+
+  <sensor>
+    <jointpos joint="shoulder_pan_joint" name="shoulder_pan_pos"/>
+    <jointpos joint="shoulder_lift_joint" name="shoulder_lift_pos"/>
+    <jointpos joint="elbow_joint" name="elbow_pos"/>
+    <jointpos joint="wrist_1_joint" name="wrist_1_pos"/>
+    <jointpos joint="wrist_2_joint" name="wrist_2_pos"/>
+    <jointpos joint="wrist_3_joint" name="wrist_3_pos"/>
+
+    <jointvel joint="shoulder_pan_joint" name="shoulder_pan_vel"/>
+    <jointvel joint="shoulder_lift_joint" name="shoulder_lift_vel"/>
+    <jointvel joint="elbow_joint" name="elbow_vel"/>
+    <jointvel joint="wrist_1_joint" name="wrist_1_vel"/>
+    <jointvel joint="wrist_2_joint" name="wrist_2_vel"/>
+    <jointvel joint="wrist_3_joint" name="wrist_3_vel"/>
+  </sensor>
+</mujoco>

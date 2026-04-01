@@ -1,31 +1,28 @@
 """
-Torque-optimal trajectory optimization.
+Torque-optimal trajectory optimization with 9 waypoints / 200 timesteps.
+
+- 9 waypoints → 10 segments (start + 9 wp + end)
+- dt = 0.1s, total_time = 20.0s → 200 steps
+- 20 timesteps per segment
+- output_dim = 9 * 6 = 54
 
 Flow:
-  1. CVAE initial guess (waypoints)
-  2. Newton correction → orientation manifold 위에 올림
-     - J = d(error_vec) / d(waypoints),  minimum-norm: Δw = -α * J^T (JJ^T + λI)^{-1} e
+  1. CVAE initial guess (9-waypoint model)
+  2. Newton correction → orientation manifold
   3. Null-space L-BFGS torque descent
-     - Projected gradient: g_proj = N @ ∇torque  (N = I - J^T (JJ^T)^{-1} J)
-     - L-BFGS with strong_wolfe line search
-     - Lazy Jacobian recomputation (threshold-based)
-     - Adaptive Newton correction (error-triggered)
 """
-
 import os
 import sys
 import time
 import math
 
-ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.append(ROOT_DIR)
 
 from src.utils.runtime_env import configure_windows_runtime
-
 configure_windows_runtime()
 
 import torch
-import torch.optim as optim
 import numpy as np
 
 from src.training.physics_layer import PhysicsLayer
@@ -34,33 +31,32 @@ from src.models.cvae import CVAE
 
 
 # ── Config ──────────────────────────────────────────────────────────────
-NUM_WAYPOINTS = 3
-TOTAL_TIME = 10.0
+NUM_WAYPOINTS = 9
+TOTAL_TIME = 20.0       # 200 steps * 0.1s
 N_SAMPLES = 128
 
 # Newton correction
 NEWTON_ITERS = 10
-NEWTON_DAMPING = 1e-3     # Levenberg-Marquardt damping (larger = more stable)
-NEWTON_STEP_SIZE = 0.5    # Damped step size (< 1 for stability)
+NEWTON_DAMPING = 1e-3
+NEWTON_STEP_SIZE = 0.5
 
-# Null-space gradient descent (with Jacobian caching)
+# Null-space gradient descent
 NULLSPACE_ITERS = 1000
 NULLSPACE_LR = 0.1
-J_RECOMPUTE_THRESHOLD = 0.05       # recompute J when ||Δw|| > this (rad)
-J_RECOMPUTE_MAX_INTERVAL = 20      # force J recompute every N iters
-CORRECTION_ERROR_THRESHOLD = 0.01  # Newton correct when ||e|| > this (rad, ~0.57 deg)
-CORRECTION_MIN_INTERVAL = 20       # min iters between corrections
-CORRECTION_NEWTON_ITERS = 3        # Newton iters per correction block
-CONVERGENCE_WINDOW = 50            # early termination window
-CONVERGENCE_REL_TOL = 1e-3         # stop if <0.1% improvement
+J_RECOMPUTE_THRESHOLD = 0.05
+J_RECOMPUTE_MAX_INTERVAL = 20
+CORRECTION_ERROR_THRESHOLD = 0.01
+CORRECTION_MIN_INTERVAL = 20
+CORRECTION_NEWTON_ITERS = 3
+CONVERGENCE_WINDOW = 50
+CONVERGENCE_REL_TOL = 1e-3
 
-# CVAE weights
-CVAE_WEIGHT_PATH = os.path.join(ROOT_DIR, "outputs/weights/cvae_debug/v5_joint_change.pth")
+# CVAE weights (9-waypoint model)
+CVAE_WEIGHT_PATH = os.path.join(ROOT_DIR, "outputs/weights/cvae_9wp/v1.pth")
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 def euler_to_quaternion(roll, pitch, yaw):
-    """Batched Euler (rad) → quaternion [x,y,z,w]."""
     cr = torch.cos(roll / 2); sr = torch.sin(roll / 2)
     cp = torch.cos(pitch / 2); sp = torch.sin(pitch / 2)
     cy = torch.cos(yaw / 2); sy = torch.sin(yaw / 2)
@@ -73,7 +69,6 @@ def euler_to_quaternion(roll, pitch, yaw):
 
 
 def random_goal_quaternions(n, device):
-    """Full-range uniform random orientations."""
     yaw   = 2 * math.pi * torch.rand(n, device=device) - math.pi
     pitch = math.pi * torch.rand(n, device=device) - math.pi / 2
     roll  = 2 * math.pi * torch.rand(n, device=device) - math.pi
@@ -81,46 +76,27 @@ def random_goal_quaternions(n, device):
 
 
 def angle_error_deg(q_final, q_goal):
-    """Quaternion angle error in degrees."""
     dot = (q_final * q_goal).sum(dim=-1).abs().clamp(-1.0, 1.0)
     return 2.0 * torch.acos(dot) * 180.0 / math.pi
 
 
-# ── Core: per-sample Newton + null-space L-BFGS optimization ────────────
+# ── Core: per-sample Newton + null-space optimization ──────────────────
 def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=False):
-    """
-    Single sample torque optimization.
-
-    Phase 1: Newton correction → project onto orientation manifold
-    Phase 2: Null-space L-BFGS with lazy Jacobian + adaptive corrections
-
-    Args:
-        w_init: [n_params] initial waypoints from CVAE
-        q0_init: [4] initial quaternion
-        q0_goal: [4] goal quaternion
-    Returns:
-        w_opt: [n_params] optimized waypoints
-        info: dict with metrics at each stage
-    """
     n_params = w_init.shape[0]
     eye_n = torch.eye(n_params, device=device)
     eye3 = torch.eye(3, device=device)
 
-    # ── Helper closures ──
     def _error_fn(w):
-        """w [n_params] → orientation error vec [3]"""
         q_traj, q_dot_traj = physics.generate_trajectory(w.unsqueeze(0))
         return physics.simulate_single_error_vec(
             q_traj[0], q_dot_traj[0], q0_init, q0_goal
         )
 
     def _torque_cost_fn(w):
-        """w [n_params] → scalar torque cost"""
         q_traj, q_dot_traj = physics.generate_trajectory(w.unsqueeze(0))
         return physics.compute_torque_cost(q_traj[0], q_dot_traj[0])
 
     def _get_final_quat(w):
-        """w [n_params] → final quaternion [4]"""
         q_traj, q_dot_traj = physics.generate_trajectory(w.unsqueeze(0))
         _, q_final = physics.simulate_single(
             q_traj[0], q_dot_traj[0], q0_init, q0_goal
@@ -128,18 +104,12 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
         return q_final
 
     def _newton_step(w, step_size=NEWTON_STEP_SIZE, damping=NEWTON_DAMPING):
-        """
-        Damped Newton correction step (Levenberg-Marquardt style).
-        Δw = -step_size * J^T (JJ^T + λI)^{-1} e
-        Returns: (w_new, e_new_norm, J)  — also returns Jacobian for reuse.
-        """
         e = _error_fn(w)
         e_norm = e.norm().item()
-
         if e_norm < 1e-6:
             return w, e_norm, None
 
-        J = torch.autograd.functional.jacobian(_error_fn, w)  # [3, n_params]
+        J = torch.autograd.functional.jacobian(_error_fn, w)
         JJT = J @ J.T + damping * eye3
         dw = -step_size * J.T @ torch.linalg.solve(JJT, e)
 
@@ -161,12 +131,10 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
                 e_new_norm = e_new.norm().item()
 
         if verbose:
-            print(f"    Newton: ||e|| {e_norm:.4f} → {e_new_norm:.4f}")
-
+            print(f"    Newton: ||e|| {e_norm:.4f} -> {e_new_norm:.4f}")
         return w_new, e_new_norm, J
 
     def _compute_nullspace(J):
-        """Compute null-space projector N = I - J^T (JJ^T + λI)^{-1} J."""
         JJT = J @ J.T + NEWTON_DAMPING * eye3
         JJT_inv_J = torch.linalg.solve(JJT, J)
         return eye_n - J.T @ JJT_inv_J
@@ -174,7 +142,7 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
     info = {}
     w = w_init.clone().detach().requires_grad_(True)
 
-    # ── Phase 0: Metrics before optimization ──
+    # Phase 0: Initial metrics
     with torch.no_grad():
         tc_init = _torque_cost_fn(w.detach())
         qf_init = _get_final_quat(w.detach())
@@ -183,7 +151,7 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
     info['angle_err_init'] = ae_init
     info['w_cvae'] = w.detach().clone()
 
-    # ── Phase 1: Newton correction (orientation manifold projection) ──
+    # Phase 1: Newton correction
     if verbose:
         print(f"  Phase 1: Newton correction ({NEWTON_ITERS} iters)")
 
@@ -207,15 +175,14 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
     info['error_norm_after_newton'] = e_after.norm().item()
     info['w_newton'] = w.detach().clone()
 
-    # ── Phase 2: Null-space gradient descent (with Jacobian caching) ──
+    # Phase 2: Null-space gradient descent
     if verbose:
-        print(f"  Phase 2: Null-space descent ({NULLSPACE_ITERS} iters, cached J)")
+        print(f"  Phase 2: Null-space descent ({NULLSPACE_ITERS} iters)")
 
     torque_history = []
     error_history = []
     j_compute_count = [0]
 
-    # Initialize Jacobian & null-space projector (reuse from Phase 1)
     if J_last is None:
         J_last = torch.autograd.functional.jacobian(_error_fn, w.detach())
         j_compute_count[0] += 1
@@ -225,7 +192,6 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
     last_correction_iter = -CORRECTION_MIN_INTERVAL
 
     for k in range(NULLSPACE_ITERS):
-        # Torque cost gradient
         w_grad = w.detach().requires_grad_(True)
         tc = _torque_cost_fn(w_grad)
         g = torch.autograd.grad(tc, w_grad)[0]
@@ -236,16 +202,14 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
                 print(f"    NaN at iter {k}, stopping")
             break
 
-        # Normalize gradient for stable step size
         g_norm = g.norm()
         if g_norm < 1e-10:
             break
 
-        # Null-space descent step (using cached N)
         dw = -NULLSPACE_LR * (N_cached @ (g / g_norm))
         w = (w.detach() + dw).requires_grad_(True)
 
-        # ── Lazy Jacobian recomputation ──
+        # Lazy Jacobian recomputation
         w_moved = (w.detach() - w_at_J).norm().item()
         if w_moved > J_RECOMPUTE_THRESHOLD or (k - last_J_iter) >= J_RECOMPUTE_MAX_INTERVAL:
             J_last = torch.autograd.functional.jacobian(_error_fn, w.detach())
@@ -254,7 +218,7 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
             last_J_iter = k
             j_compute_count[0] += 1
 
-        # ── Error monitoring & adaptive Newton correction ──
+        # Error monitoring & adaptive Newton correction
         with torch.no_grad():
             e_cur = _error_fn(w.detach())
             e_norm = e_cur.norm().item()
@@ -277,17 +241,16 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
             print(f"    Iter {k+1}: torque={tc.item():.1f}, "
                   f"||e||={e_norm:.6f}, J_calls={j_compute_count[0]}")
 
-        # ── Early termination ──
+        # Early termination
         if len(torque_history) > CONVERGENCE_WINDOW:
             old_tc = torque_history[-CONVERGENCE_WINDOW]
             new_tc = torque_history[-1]
             if old_tc > 0 and (old_tc - new_tc) / old_tc < CONVERGENCE_REL_TOL:
                 if verbose:
-                    print(f"    Converged at iter {k+1}: "
-                          f"Δtc/tc < {CONVERGENCE_REL_TOL} over {CONVERGENCE_WINDOW} iters")
+                    print(f"    Converged at iter {k+1}")
                 break
 
-    # ── Final metrics ──
+    # Final metrics
     with torch.no_grad():
         tc_final = _torque_cost_fn(w.detach())
         qf_final = _get_final_quat(w.detach())
@@ -305,10 +268,6 @@ def optimize_single_sample(physics, w_init, q0_init, q0_goal, device, verbose=Fa
 
 
 def plot_sample_trajectories(physics, info, q0_init, q0_goal, sample_idx, save_dir):
-    """
-    Plot trajectory (joint angles, velocities) and torque profiles
-    for each optimization stage of a single sample.
-    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -328,7 +287,6 @@ def plot_sample_trajectories(physics, info, q0_init, q0_goal, sample_idx, save_d
     t_axis = np.linspace(0, physics.total_time, physics.num_steps)
     joint_labels = [f'J{j+1}' for j in range(n_q)]
 
-    # Collect data for each stage
     stage_data = {}
     for name, w in stages.items():
         with torch.no_grad():
@@ -340,9 +298,7 @@ def plot_sample_trajectories(physics, info, q0_init, q0_goal, sample_idx, save_d
             'tau': torques.cpu().numpy(),
         }
 
-    # ── Figure 1: Overlay all stages per joint (3 rows x n_q cols) ──
     fig, axes = plt.subplots(3, n_q, figsize=(4 * n_q, 10), sharex=True)
-
     row_labels = ['Joint Angle (rad)', 'Joint Velocity (rad/s)', 'Torque (Nm)']
     data_keys = ['q', 'qd', 'tau']
 
@@ -365,13 +321,13 @@ def plot_sample_trajectories(physics, info, q0_init, q0_goal, sample_idx, save_d
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='upper center', ncol=3, fontsize=10,
                bbox_to_anchor=(0.5, 1.0))
-    fig.suptitle(f'Sample {sample_idx}: Trajectory & Torque Comparison', fontsize=13, y=1.03)
+    fig.suptitle(f'Sample {sample_idx}: 9WP Trajectory & Torque (T=20s, 200 steps)',
+                 fontsize=13, y=1.03)
     fig.tight_layout()
     path1 = os.path.join(save_dir, f'sample_{sample_idx}_trajectories.png')
     fig.savefig(path1, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
-    # ── Figure 2: Torque norm over time ──
     fig2, ax2 = plt.subplots(figsize=(8, 4))
     for name in stages:
         tau = stage_data[name]['tau']
@@ -380,7 +336,7 @@ def plot_sample_trajectories(physics, info, q0_init, q0_goal, sample_idx, save_d
                  linewidth=1.5, alpha=0.85)
     ax2.set_xlabel('Time (s)')
     ax2.set_ylabel('||torque|| (Nm)')
-    ax2.set_title(f'Sample {sample_idx}: Torque Norm Over Time')
+    ax2.set_title(f'Sample {sample_idx}: Torque Norm (9WP)')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     fig2.tight_layout()
@@ -396,16 +352,18 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
-    # Robot & Physics
     urdf_path = os.path.join(ROOT_DIR, "assets/SC_ur10e.urdf")
     robot, _ = urdf2robot(urdf_path, verbose_flag=False, device=device)
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
 
     n_q = robot["n_q"]
-    output_dim = NUM_WAYPOINTS * n_q
+    output_dim = NUM_WAYPOINTS * n_q  # 54
 
-    # ── Load CVAE ──
-    COND_DIM = 8  # start_quat(4) + goal_quat(4), matching train_cvae.py
+    print(f"  Waypoints: {NUM_WAYPOINTS}, Steps: {physics.num_steps}, "
+          f"Segments: {physics.num_segments}, Steps/seg: {physics.steps_per_segment}")
+
+    # Load 9-waypoint CVAE
+    COND_DIM = 8
     LATENT_DIM = 3
     cvae = CVAE(COND_DIM, output_dim, LATENT_DIM,
                 joint_limits=robot['joint_limits']).to(device)
@@ -420,7 +378,7 @@ def main():
         print(f"CVAE weights not found at {CVAE_WEIGHT_PATH}, using random init")
         use_cvae = False
 
-    # ── Fixed Euler goal: [15°, 15°, -15°] (roll, pitch, yaw) for all samples ──
+    # Fixed goal: [15, 15, -15] deg
     torch.manual_seed(42)
     roll_deg, pitch_deg, yaw_deg = 15.0, 15.0, -15.0
     roll = torch.tensor(math.radians(roll_deg), device=device).expand(N_SAMPLES)
@@ -430,15 +388,14 @@ def main():
     q0_start = torch.zeros(N_SAMPLES, 4, device=device)
     q0_start[:, 3] = 1.0
 
-    # ── CVAE initial guess ──
-    # condition = [start_quat, goal_quat] (COND_DIM=8)
+    # CVAE initial guess
     with torch.no_grad():
         condition = torch.cat([q0_start, q0_goals], dim=1)
         waypoints_init = cvae.inference(condition)
 
-    # ── Phase 0: Batch evaluate all CVAE samples, pick best ──
+    # Batch evaluate all samples
     print(f"\n{'='*70}")
-    print(f"Evaluating {N_SAMPLES} CVAE samples to select best initial guess...")
+    print(f"Evaluating {N_SAMPLES} CVAE samples (9WP)...")
     with torch.no_grad():
         q_traj_all, qd_traj_all = physics.generate_trajectory(waypoints_init)
         batch_sim = torch.func.vmap(physics.simulate_single, in_dims=(0, 0, 0, 0))
@@ -450,15 +407,16 @@ def main():
 
     best_idx = losses_all.argmin().item()
     torque_cost_best = physics.compute_torque_cost(q_traj_all[best_idx], qd_traj_all[best_idx])
-    print(f"  Best sample: #{best_idx} (loss={losses_all[best_idx]:.4f}, angle_err={ae_all[best_idx]:.2f} deg, torque_cost={torque_cost_best:.4f})")
+    print(f"  Best sample: #{best_idx} (loss={losses_all[best_idx]:.4f}, "
+          f"angle_err={ae_all[best_idx]:.2f} deg, torque={torque_cost_best:.4f})")
 
-    # ── Phase 1-2: Optimize only the best sample ──
+    # Optimize best sample
     print(f"\nOptimizing best sample #{best_idx}...")
-    print(f"  Newton: {NEWTON_ITERS} iters, damping={NEWTON_DAMPING}, step={NEWTON_STEP_SIZE}")
-    print(f"  Null-space: {NULLSPACE_ITERS} iters, lr={NULLSPACE_LR}, J_cache_interval={J_RECOMPUTE_MAX_INTERVAL}")
+    print(f"  Newton: {NEWTON_ITERS} iters, damping={NEWTON_DAMPING}")
+    print(f"  Null-space: {NULLSPACE_ITERS} iters, lr={NULLSPACE_LR}")
     print(f"{'='*70}\n")
 
-    save_dir = os.path.join(ROOT_DIR, "outputs/plots/torque_opt")
+    save_dir = os.path.join(ROOT_DIR, "outputs/plots/torque_opt_9wp")
     os.makedirs(save_dir, exist_ok=True)
 
     t_start = time.time()
@@ -484,10 +442,10 @@ def main():
         reduction = (1 - info['torque_final'] / info['torque_after_newton']) * 100
         print(f"Torque reduction (null-space): {reduction:.1f}%")
     print(f"Total time: {total_time_elapsed:.1f}s")
-    print(f"L-BFGS iters: {len(info['torque_history'])}, Jacobian calls: {info.get('j_compute_count', 'N/A')}")
+    print(f"Null-space iters: {len(info['torque_history'])}, J calls: {info.get('j_compute_count', 'N/A')}")
     print(f"{'='*70}")
 
-    # ── Per-sample trajectory & torque plots ──
+    # Trajectory plots
     try:
         p1, p2 = plot_sample_trajectories(
             physics, info, q0_start[best_idx], q0_goals[best_idx], best_idx, save_dir)
@@ -496,7 +454,7 @@ def main():
     except Exception as e:
         print(f"  Plotting failed: {e}")
 
-    # ── Save results ──
+    # Save results
     np.savez(
         os.path.join(save_dir, "results.npz"),
         best_idx=best_idx,
@@ -513,7 +471,7 @@ def main():
         goal=q0_goals[best_idx].cpu().numpy(),
     )
 
-    # ── Plot ──
+    # Summary plot
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -521,7 +479,6 @@ def main():
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-        # All CVAE samples: loss distribution
         ax = axes[0, 0]
         losses_np = losses_all.cpu().numpy()
         ax.hist(losses_np, bins=30, color='#4e79a7', edgecolor='white', alpha=0.8)
@@ -529,43 +486,39 @@ def main():
                    label=f'best #{best_idx} = {losses_np[best_idx]:.4f}')
         ax.set_xlabel("Physics Loss")
         ax.set_ylabel("Count")
-        ax.set_title(f"CVAE Sample Selection ({N_SAMPLES} candidates)")
+        ax.set_title(f"CVAE 9WP Sample Selection ({N_SAMPLES} candidates)")
         ax.legend()
 
-        # Optimization stages (bar)
         ax = axes[0, 1]
         stages = ['CVAE init', 'Newton', 'Null-space']
         vals = [info['torque_init'], info['torque_after_newton'], info['torque_final']]
         bars = ax.bar(stages, vals,
                        color=['#4e79a7', '#f28e2b', '#59a14f'], edgecolor='white')
         ax.set_ylabel("Torque Cost")
-        ax.set_title("Torque Cost by Stage (best sample)")
+        ax.set_title("Torque Cost by Stage (9WP)")
         for bar, v in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
                     f'{v:.1f}', ha='center', va='bottom', fontsize=9)
 
-        # Angle error stages (bar)
         ax = axes[1, 0]
         ae_vals = [info['angle_err_init'], info['angle_err_after_newton'], info['angle_err_final']]
         bars = ax.bar(stages, ae_vals,
                        color=['#4e79a7', '#f28e2b', '#59a14f'], edgecolor='white')
         ax.set_ylabel("Angle Error (deg)")
-        ax.set_title("Orientation Error by Stage (best sample)")
+        ax.set_title("Orientation Error by Stage (9WP)")
         for bar, v in zip(bars, ae_vals):
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
                     f'{v:.2f}', ha='center', va='bottom', fontsize=9)
 
-        # Torque convergence
         ax = axes[1, 1]
         if info['torque_history']:
             ax.plot(info['torque_history'], color='#59a14f', linewidth=1.5)
             ax.set_xlabel("Null-space Iteration")
             ax.set_ylabel("Torque Cost")
-            ax.set_title("Torque Convergence (best sample)")
+            ax.set_title("Torque Convergence (9WP)")
             ax.grid(True, alpha=0.3)
 
-        fig.suptitle(f"Torque Optimization: best of {N_SAMPLES} CVAE samples",
-                     fontsize=13)
+        fig.suptitle(f"9WP Torque Optimization (T=20s, 200 steps)", fontsize=13)
         fig.tight_layout()
         fig.savefig(os.path.join(save_dir, "torque_optimization.png"), dpi=150)
         plt.close(fig)
