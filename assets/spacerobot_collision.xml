@@ -1,0 +1,95 @@
+<mujoco model="spacerobot_collision">
+  <compiler angle="radian" meshdir="meshes/ur10e/collision/"/>
+  <option cone="elliptic" gravity="0 0 0" impratio="5" timestep="0.01" tolerance="1e-10"/>
+
+  <asset>
+    <mesh name="base_mesh"      file="base.stl"/>
+    <mesh name="shoulder_mesh"  file="shoulder.stl"/>
+    <mesh name="upperarm_mesh"  file="upperarm.stl"/>
+    <mesh name="forearm_mesh"   file="forearm.stl"/>
+    <mesh name="wrist1_mesh"    file="wrist1.stl"/>
+    <mesh name="wrist2_mesh"    file="wrist2.stl"/>
+    <mesh name="wrist3_mesh"    file="wrist3.stl"/>
+  </asset>
+
+  <worldbody>
+    <body name="base_link" pos="0 0 0">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="104" diaginertia="16.676106 16.676106 16.67125"/>
+      <geom name="base_box" size="0.5 0.5 0.5" type="box" group="1" density="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="base_col" type="mesh" mesh="base_mesh" pos="0 0 0.5" group="3" density="0" rgba="0.7 0.7 0.7 0.3"/>
+
+      <body name="shoulder_link" pos="0 0 0.581">
+        <inertial pos="0 0 0" mass="7.778" diaginertia="0.0315 0.0315 0.02188"/>
+        <joint name="shoulder_pan_joint" axis="0 0 1" range="-100 100" actuatorfrcrange="-330 330"/>
+        <geom name="shoulder_col" type="mesh" mesh="shoulder_mesh" group="3" density="0" rgba="0.3 0.6 0.9 0.3"/>
+
+        <body name="upper_arm_link" pos="0 0.176 0">
+          <inertial pos="0 0 0.3065" mass="12.93" diaginertia="0.42307 0.42307 0.0364"/>
+          <joint name="shoulder_lift_joint" axis="0 1 0" range="-100 100" actuatorfrcrange="-330 330"/>
+          <geom name="upperarm_col" type="mesh" mesh="upperarm_mesh" group="3" density="0" rgba="0.3 0.6 0.9 0.3"/>
+
+          <body name="forearm_link" pos="0 -0.137 0.613">
+            <inertial pos="0 0 0.2855" mass="3.87" diaginertia="0.11059 0.11059 0.01088"/>
+            <joint name="elbow_joint" axis="0 1 0" range="-100 100" actuatorfrcrange="-150 150"/>
+            <geom name="forearm_col" type="mesh" mesh="forearm_mesh" group="3" density="0" rgba="0.3 0.6 0.9 0.3"/>
+
+            <body name="wrist_1_link" pos="0 0 0.571" quat="0.707107 0 0.707107 0">
+              <inertial pos="0 0.135 0" mass="1.96" diaginertia="0.005108 0.005108 0.0055125"/>
+              <joint name="wrist_1_joint" axis="0 1 0" range="-100 100" actuatorfrcrange="-54 54"/>
+              <geom name="wrist1_col" type="mesh" mesh="wrist1_mesh" group="3" density="0" rgba="0.9 0.5 0.2 0.3"/>
+
+              <body name="wrist_2_link" pos="0 0.135 0">
+                <inertial pos="0 0 0.12" mass="1.96" diaginertia="0.005108 0.005108 0.0055125"/>
+                <joint name="wrist_2_joint" axis="0 0 1" range="-100 100" actuatorfrcrange="-54 54"/>
+                <geom name="wrist2_col" type="mesh" mesh="wrist2_mesh" group="3" density="0" rgba="0.9 0.5 0.2 0.3"/>
+
+                <body name="wrist_3_link" pos="0 0 0.12">
+                  <inertial pos="0 0.092 0" quat="0.7071068 0.7071068 0 0" mass="10.202" diaginertia="0.010144 0.010144 0.010205"/>
+                  <joint name="wrist_3_joint" axis="0 1 0" range="-100 100" actuatorfrcrange="-54 54"/>
+                  <geom name="wrist3_col" type="mesh" mesh="wrist3_mesh" group="3" density="0" rgba="0.9 0.5 0.2 0.3"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- 인접/근접 링크 쌍 충돌 제외 (parent-child + 1-hop) -->
+  <contact>
+    <exclude body1="base_link"      body2="shoulder_link"/>
+    <exclude body1="base_link"      body2="upper_arm_link"/>
+    <exclude body1="shoulder_link"  body2="upper_arm_link"/>
+    <exclude body1="upper_arm_link" body2="forearm_link"/>
+    <exclude body1="forearm_link"   body2="wrist_1_link"/>
+    <exclude body1="wrist_1_link"   body2="wrist_2_link"/>
+    <exclude body1="wrist_2_link"   body2="wrist_3_link"/>
+  </contact>
+
+  <actuator>
+    <general ctrllimited="true" ctrlrange="-330 330" forcelimited="true" forcerange="-330 330" joint="shoulder_pan_joint" name="shoulder_pan_T"/>
+    <general ctrllimited="true" ctrlrange="-330 330" forcelimited="true" forcerange="-330 330" joint="shoulder_lift_joint" name="shoulder_lift_T"/>
+    <general ctrllimited="true" ctrlrange="-150 150" forcelimited="true" forcerange="-150 150" joint="elbow_joint" name="elbow_T"/>
+    <general ctrllimited="true" ctrlrange="-54 54" forcelimited="true" forcerange="-54 54" joint="wrist_1_joint" name="wrist_1_T"/>
+    <general ctrllimited="true" ctrlrange="-54 54" forcelimited="true" forcerange="-54 54" joint="wrist_2_joint" name="wrist_2_T"/>
+    <general ctrllimited="true" ctrlrange="-54 54" forcelimited="true" forcerange="-54 54" joint="wrist_3_joint" name="wrist_3_T"/>
+  </actuator>
+
+  <sensor>
+    <jointpos joint="shoulder_pan_joint" name="shoulder_pan_pos"/>
+    <jointpos joint="shoulder_lift_joint" name="shoulder_lift_pos"/>
+    <jointpos joint="elbow_joint" name="elbow_pos"/>
+    <jointpos joint="wrist_1_joint" name="wrist_1_pos"/>
+    <jointpos joint="wrist_2_joint" name="wrist_2_pos"/>
+    <jointpos joint="wrist_3_joint" name="wrist_3_pos"/>
+
+    <jointvel joint="shoulder_pan_joint" name="shoulder_pan_vel"/>
+    <jointvel joint="shoulder_lift_joint" name="shoulder_lift_vel"/>
+    <jointvel joint="elbow_joint" name="elbow_vel"/>
+    <jointvel joint="wrist_1_joint" name="wrist_1_vel"/>
+    <jointvel joint="wrist_2_joint" name="wrist_2_vel"/>
+    <jointvel joint="wrist_3_joint" name="wrist_3_vel"/>
+  </sensor>
+</mujoco>
