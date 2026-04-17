@@ -219,7 +219,7 @@ def main():
     TOTAL_TIME = 10.0
     MAX_JOINT_WEIGHT = 0.01
     JOINT_LIMIT_WEIGHT = 1.0
-    TARGET_TOTAL = 5000
+    TARGET_TOTAL = 20000
     THRESHOLD_DEG = 1.0
 
     physics = PhysicsLayer(robot, NUM_WAYPOINTS, TOTAL_TIME, device)
@@ -368,7 +368,7 @@ def main():
     assert dataset_np.shape == (TARGET_TOTAL, physics.num_steps, robot["n_q"]), \
         f"Expected ({TARGET_TOTAL}, {physics.num_steps}, {robot['n_q']}), got {dataset_np.shape}"
 
-    npy_path = os.path.join(save_dir, "trajectories_collision_free_5000x100x6.npy")
+    npy_path = os.path.join(save_dir, "trajectories_collision_free_20000x100x6.npy")
     np.save(npy_path, dataset_np)
 
     meta = {
