@@ -285,6 +285,10 @@ def main():
     collected = seed_traj.shape[0]
     print(f"  Collected: {collected}/{TARGET_TOTAL}")
 
+    # Collision rejection counters
+    stats_total_converged = int((phase1_errs < THRESHOLD_DEG).sum())
+    stats_total_collision_rejected = stats_total_converged - n_seeds_found
+
     # ==================================================================
     # Phase 2: Perturb + re-optimize in batches
     # ==================================================================
@@ -316,17 +320,22 @@ def main():
         t2_elapsed = time.time() - t2
 
         n_conv = conv_traj.shape[0]
+        stats_total_converged += n_conv
         print(f"  Converged: {n_conv}/{actual_batch}")
 
         # MuJoCo filter
+        n_col_free = 0
         if n_conv > 0:
             conv_traj_np = conv_traj.cpu().numpy()
             col_mask = mujoco_filter(conv_traj_np, checker)
-            n_col_free = col_mask.sum()
+            n_col_free = int(col_mask.sum())
+            n_rejected = n_conv - n_col_free
+            stats_total_collision_rejected += n_rejected
             conv_traj = conv_traj[torch.from_numpy(col_mask).to(device)]
             conv_wp = conv_wp[torch.from_numpy(col_mask).to(device)]
             n_conv = conv_traj.shape[0]
-            print(f"  MuJoCo filter: {n_col_free} collision-free")
+            print(f"  MuJoCo filter: {n_col_free}/{n_col_free + n_rejected} passed "
+                  f"({n_rejected} rejected)")
 
         take = min(n_conv, remaining)
         if take > 0:
@@ -378,6 +387,9 @@ def main():
         "joint_upper": JOINT_UPPER.tolist(),
         "generation_time_s": t_total,
         "collision_checked": True,
+        "total_converged_before_filter": stats_total_converged,
+        "total_collision_rejected": stats_total_collision_rejected,
+        "collision_reject_rate": stats_total_collision_rejected / max(stats_total_converged, 1),
     }
     np.save(os.path.join(save_dir, "metadata.npy"), meta)
 
@@ -395,6 +407,10 @@ def main():
     print(f"Saved to    : {npy_path}")
     print(f"Total time  : {t_total:.1f}s ({t_total/60:.1f}min)")
     print(f"Collision-free verified: {n_verified}/{TARGET_TOTAL}")
+    print(f"\nCollision filter stats:")
+    print(f"  Total converged (before filter): {stats_total_converged}")
+    print(f"  Rejected by MuJoCo collision:    {stats_total_collision_rejected}")
+    print(f"  Collision reject rate:           {stats_total_collision_rejected/max(stats_total_converged,1)*100:.1f}%")
 
     print(f"\nPer-joint range (rad):")
     for j in range(robot["n_q"]):

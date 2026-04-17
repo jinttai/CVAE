@@ -1,0 +1,5 @@
+Total trajectories: 5000
+Collision-free: 24 (0.5%)
+Colliding: 4976 (99.5%)
+Colliding mean timesteps: 29.4/100
+Colliding max timesteps: 70/100

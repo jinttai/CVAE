@@ -1,0 +1,69 @@
+=== Topology Analysis v2 ===
+Original shape:       (5000, 100, 6)
+Collision-Free shape: (5000, 100, 6)
+
+=== Per-timestep Original (800) ===
+  t=25 (2.5s): B0=1, H1 long=96, max H1=0.888, time=0.2s
+    H0 top5 persistence: [3.59007072 3.27247763 3.16887617 2.49266505 2.37755513]
+  t=50 (5.0s): B0=1, H1 long=57, max H1=1.130, time=0.2s
+    H0 top5 persistence: [3.21820927 2.67930293 2.65976238 2.60392427 2.48922873]
+  t=75 (7.5s): B0=1, H1 long=86, max H1=1.104, time=0.3s
+    H0 top5 persistence: [2.84210229 2.70389056 2.5329504  2.44933891 2.20243716]
+
+=== Per-timestep Collision-Free (800) ===
+  t=25 (2.5s): B0=1, H1 long=65, max H1=0.585, time=0.2s
+    H0 top5 persistence: [2.50545597 2.13428497 2.04171276 1.95289993 1.79920793]
+  t=50 (5.0s): B0=1, H1 long=39, max H1=0.507, time=0.2s
+    H0 top5 persistence: [3.15200138 2.13653803 2.12060261 1.99902678 1.65132475]
+  t=75 (7.5s): B0=1, H1 long=50, max H1=0.525, time=0.2s
+    H0 top5 persistence: [2.01492524 1.89064825 1.83032954 1.7150203  1.70909142]
+
+=== Node-based Original: 5000 trajectories in 600D ===
+  PCA(10D) cumulative variance: 0.878
+  Top 5 var: [0.296 0.169 0.093 0.081 0.062]
+  Intrinsic dim (TwoNN in 10D PCA): 3.31
+  ripser computed in 0.9s
+  B0 (trajectory-space clusters): 1
+  H0 top5 persistence: [22.38739586 21.38328552 21.0628624  19.87929916 19.85196114]
+  H1 loops (>0.5 pers): 197
+  H1 top5 persistence: [10.29562664  9.68140984  6.87981987  5.95477486  5.1333046 ]
+
+=== Node-based Collision-Free: 5000 trajectories in 600D ===
+  PCA(10D) cumulative variance: 0.934
+  Top 5 var: [0.484 0.216 0.046 0.038 0.034]
+  Intrinsic dim (TwoNN in 10D PCA): 4.66
+  ripser computed in 0.8s
+  B0 (trajectory-space clusters): 3
+  H0 top5 persistence: [26.11977768 25.68149567 13.93413925 13.65884304 12.68587589]
+  H1 loops (>0.5 pers): 509
+  H1 top5 persistence: [3.86082268 3.06738377 2.78545952 2.77367973 2.54126072]
+Saved: C:\CVAE\outputs/results/topology_analysis_v2\h0_gap_bars.png
+Saved: C:\CVAE\outputs/results/topology_analysis_v2\node_persistence_diagrams.png
+Saved: C:\CVAE\outputs/results/topology_analysis_v2\node_pca_2d.png
+Saved: C:\CVAE\outputs/results/topology_analysis_v2\node_pca_3d.png
+  Original: 5/18
+  Original: 10/18
+  Original: 15/18
+  Col-Free: 5/18
+  Col-Free: 10/18
+  Col-Free: 15/18
+Saved: C:\CVAE\outputs/results/topology_analysis_v2\betti_evolution_fixed.png
+
+========================================================================
+SUMMARY (v2)
+========================================================================
+Metric                                        Original        Col-Free
+------------------------------------------------------------------------
+t=2.5s B0 (gap-based):                            1               1
+t=2.5s H1 long loops (>0.2):                     96              65
+t=5.0s B0 (gap-based):                            1               1
+t=5.0s H1 long loops (>0.2):                     57              39
+t=7.5s B0 (gap-based):                            1               1
+t=7.5s H1 long loops (>0.2):                     86              50
+
+-- Node-based (trajectory-as-point) --
+Trajectory-space B0                                  1               3
+Trajectory-space ID (10D PCA)                     3.31            4.66
+H0 top persistence                              22.387          26.120
+
+=== Done. Output: C:\CVAE\outputs/results/topology_analysis_v2 ===
