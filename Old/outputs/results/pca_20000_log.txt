@@ -1,0 +1,31 @@
+=== PCA Analysis: 5000 Original vs 20000 Collision-Free ===
+
+Original:       (5000, 100, 6)
+Collision-Free: (20000, 100, 6)
+
+Original PCA variance ratio:
+  [0.3325 0.2687 0.1133 0.1115]
+  Top 2 total: 60.1%
+Col-Free PCA variance ratio:
+  [0.3346 0.2767 0.1653 0.1105]
+  Top 2 total: 61.1%
+
+Saved: C:\CVAE\outputs/results/collision_free_dataset\pca_embedded_20000x100x2.npy  shape=(20000, 100, 2)
+Saved: C:\CVAE\outputs/results/collision_free_dataset\pca_comparison_2d_snapshots_20000.png
+Saved: C:\CVAE\outputs/results/collision_free_dataset\pca_comparison_3d_20000.png
+Saved: C:\CVAE\outputs/results/collision_free_dataset\pca_3d_timeflow_20000.png
+Saved: C:\CVAE\outputs/results/collision_free_dataset\pca_variance_comparison_20000.png
+C:\CVAE\scripts\optimize\pca_analysis_20000.py:169: UserWarning: This figure includes Axes that are not compatible with tight_layout, so results might be incorrect.
+  plt.tight_layout()
+Saved: C:\CVAE\outputs/results/collision_free_dataset\pca_loadings_comparison_20000.png
+
+--- Joint range (rad) ---
+Joint                  Original             Col-Free (20000)
+  J1   [-5.552, +5.157]        [-2.276, +3.791]
+  J2   [-4.613, +3.887]        [-2.020, +2.023]
+  J3   [-5.595, +4.959]        [-2.831, +2.913]
+  J4   [-4.768, +4.798]        [-2.593, +2.586]
+  J5   [-4.898, +4.810]        [-2.060, +2.256]
+  J6   [-4.597, +5.165]        [-3.001, +3.001]
+
+=== Done. Output dir: C:\CVAE\outputs/results/collision_free_dataset ===

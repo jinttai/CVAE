@@ -1,0 +1,78 @@
+=== Dataset Bias Analysis ===
+
+
+--- uniform null: uniform-null baseline ---
+
+========================================================================
+TEST 1: Cluster tightness (Is dataset = tight balls around few seeds?)
+========================================================================
+
+--- 5k Col-Free: seed-tightness test ---
+ n_seeds    mean_radius   std_radius   max_radius
+       5          2.748        0.230        3.048
+      10          2.713        0.462        3.458
+      20          2.455        0.557        3.242
+      50          2.226        0.357        2.760
+     100          2.014        0.276        2.553
+  Expected radius if pure perturb (sqrt(18)*0.2): 0.85
+
+--- 20k Col-Free: seed-tightness test ---
+ n_seeds    mean_radius   std_radius   max_radius
+       5          3.797        0.440        4.368
+      10          3.414        0.556        4.191
+      20          3.213        0.365        3.757
+      50          2.902        0.310        3.444
+     100          2.678        0.263        3.242
+  Expected radius if pure perturb (sqrt(18)*0.2): 0.85
+
+--- uniform null (unbiased): seed-tightness test ---
+ n_seeds    mean_radius   std_radius   max_radius
+       5          5.725        0.026        5.757
+      10          5.507        0.042        5.579
+      20          5.267        0.037        5.326
+      50          4.941        0.063        5.080
+     100          4.674        0.081        4.882
+  Expected radius if pure perturb (sqrt(18)*0.2): 0.85
+
+========================================================================
+TEST 2: Joint range coverage (uniform = no bias)
+========================================================================
+
+--- 5k Col-Free: joint coverage ---
+  Joint 0: range=5.94/5.50 (108%)  uniformity=0.92  (OK)
+  Joint 1: range=4.04/4.00 (101%)  uniformity=0.96  (OK)
+  Joint 2: range=5.60/5.50 (102%)  uniformity=0.91  (OK)
+  Joint 3: range=5.11/5.00 (102%)  uniformity=1.00  (OK)
+  Joint 4: range=4.29/4.20 (102%)  uniformity=0.97  (OK)
+  Joint 5: range=6.00/6.00 (100%)  uniformity=0.98  (OK)
+
+--- 20k Col-Free: joint coverage ---
+  Joint 0: range=6.07/5.50 (110%)  uniformity=0.96  (OK)
+  Joint 1: range=4.04/4.00 (101%)  uniformity=0.93  (OK)
+  Joint 2: range=5.74/5.50 (104%)  uniformity=0.95  (OK)
+  Joint 3: range=5.18/5.00 (104%)  uniformity=0.96  (OK)
+  Joint 4: range=4.32/4.20 (103%)  uniformity=1.00  (OK)
+  Joint 5: range=6.00/6.00 (100%)  uniformity=0.99  (OK)
+
+--- uniform null: joint coverage ---
+  Joint 0: range=5.50/5.50 (100%)  uniformity=1.00  (OK)
+  Joint 1: range=4.00/4.00 (100%)  uniformity=1.00  (OK)
+  Joint 2: range=5.50/5.50 (100%)  uniformity=1.00  (OK)
+  Joint 3: range=5.00/5.00 (100%)  uniformity=1.00  (OK)
+  Joint 4: range=4.20/4.20 (100%)  uniformity=1.00  (OK)
+  Joint 5: range=6.00/6.00 (100%)  uniformity=1.00  (OK)
+
+========================================================================
+TEST 3: Pairwise distance distribution
+========================================================================
+  5k  distances:    mean=6.98  std=2.57
+  20k distances:    mean=8.35  std=2.70
+  uniform distances: mean=8.71  std=1.28
+Traceback (most recent call last):
+  File "C:\CVAE\scripts\optimize\dataset_bias_analysis.py", line 292, in <module>
+    main()
+    ~~~~^^
+  File "C:\CVAE\scripts\optimize\dataset_bias_analysis.py", line 183, in main
+    print(f"  uniform expected std/mean \u2248 0.25 for uniform cube")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'cp949' codec can't encode character '\u2248' in position 28: illegal multibyte sequence

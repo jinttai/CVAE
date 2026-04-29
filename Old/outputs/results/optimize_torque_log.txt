@@ -1,0 +1,120 @@
+Device: cpu
+Loaded CVAE from C:\CVAE\outputs/weights/cvae_debug/v5_joint_change.pth
+
+======================================================================
+Evaluating 128 CVAE samples to select best initial guess...
+  Physics loss : min=-10.7371, mean=-6.8745, max=-5.1274
+  Angle error  : min=0.27, mean=2.02, max=4.41 deg
+  Best sample: #51 (loss=-10.7371, angle_err=0.27 deg, torque_cost=31929.3555)
+
+Optimizing best sample #51...
+  Newton: 10 iters, damping=0.001, step=0.5
+  Null-space: 1000 iters, lr=0.1, J_cache_interval=20
+======================================================================
+
+  Phase 1: Newton correction (10 iters)
+    Newton: ||e|| 0.0047 ⊥ 0.0024
+    Newton: ||e|| 0.0024 ⊥ 0.0012
+    Newton: ||e|| 0.0012 ⊥ 0.0006
+    Newton: ||e|| 0.0006 ⊥ 0.0003
+    Newton: ||e|| 0.0003 ⊥ 0.0002
+    Newton: ||e|| 0.0002 ⊥ 0.0001
+    Newton: ||e|| 0.0001 ⊥ 0.0000
+    Newton: ||e|| 0.0000 ⊥ 0.0000
+    Newton: ||e|| 0.0000 ⊥ 0.0000
+    Newton: ||e|| 0.0000 ⊥ 0.0000
+    Converged at iter 10
+  Phase 2: Null-space descent (1000 iters, cached J)
+    Newton: ||e|| 0.0102 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 50: torque=16123.1, ||e||=0.002321, J_calls=30
+    Newton: ||e|| 0.0102 ⊥ 0.0051
+    Newton: ||e|| 0.0051 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 100: torque=14031.8, ||e||=0.006840, J_calls=47
+    Newton: ||e|| 0.0103 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0102 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 150: torque=12772.8, ||e||=0.003760, J_calls=65
+    Newton: ||e|| 0.0103 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0102 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 200: torque=11099.5, ||e||=0.001675, J_calls=85
+    Newton: ||e|| 0.0101 ⊥ 0.0051
+    Newton: ||e|| 0.0051 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 250: torque=6146.0, ||e||=0.008786, J_calls=111
+    Newton: ||e|| 0.0103 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0101 ⊥ 0.0051
+    Newton: ||e|| 0.0051 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 300: torque=4253.8, ||e||=0.006169, J_calls=136
+    Newton: ||e|| 0.0103 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0101 ⊥ 0.0051
+    Newton: ||e|| 0.0051 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 350: torque=3948.0, ||e||=0.005969, J_calls=153
+    Newton: ||e|| 0.0103 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0102 ⊥ 0.0051
+    Newton: ||e|| 0.0051 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 400: torque=3726.1, ||e||=0.006510, J_calls=168
+    Newton: ||e|| 0.0102 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0103 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 450: torque=3512.0, ||e||=0.007240, J_calls=183
+    Newton: ||e|| 0.0102 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0103 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0027
+    Newton: ||e|| 0.0027 ⊥ 0.0013
+    Iter 500: torque=3371.0, ||e||=0.007299, J_calls=196
+    Newton: ||e|| 0.0101 ⊥ 0.0051
+    Newton: ||e|| 0.0051 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0101 ⊥ 0.0051
+    Newton: ||e|| 0.0051 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 550: torque=3325.8, ||e||=0.006656, J_calls=207
+    Newton: ||e|| 0.0103 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Newton: ||e|| 0.0102 ⊥ 0.0052
+    Newton: ||e|| 0.0052 ⊥ 0.0026
+    Newton: ||e|| 0.0026 ⊥ 0.0013
+    Iter 600: torque=3318.5, ||e||=0.005237, J_calls=216
+    Converged at iter 602: 汁tc/tc < 0.001 over 50 iters
+
+======================================================================
+Stage                |    Torque Cost |    Angle Error
+式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式
+CVAE init            |       31929.36 |       0.27 deg
+After Newton         |       32179.40 |       0.00 deg
+After null-space     |        3308.86 |       0.33 deg
+式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式式
+Torque reduction (null-space): 89.7%
+Total time: 133.8s
+L-BFGS iters: 602, Jacobian calls: 217
+======================================================================
+  -> C:\CVAE\outputs/plots/torque_opt\sample_51_trajectories.png
+  -> C:\CVAE\outputs/plots/torque_opt\sample_51_torque_norm.png
+
+Plot saved to C:\CVAE\outputs/plots/torque_opt/torque_optimization.png
+Results saved to C:\CVAE\outputs/plots/torque_opt/results.npz

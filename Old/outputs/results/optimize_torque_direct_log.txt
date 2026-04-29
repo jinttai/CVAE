@@ -1,0 +1,30 @@
+Device: cpu
+Loaded CVAE from C:\CVAE\outputs/weights/cvae_debug/v5_joint_change.pth
+Goal: roll=15.0, pitch=15.0, yaw=-15.0 deg
+
+CVAE selection: 128 samples
+  loss: min=-10.7371, mean=-6.8745
+  angle_err: min=0.27, mean=2.02 deg
+  best: #51 (loss=-10.7371, angle_err=0.27 deg)
+
+============================================================
+Augmented Lagrangian: orient_tol=0.5 deg
+============================================================
+  [AL] Outer  1  torque=1358.3  angle=11.51deg  ¥ë=0.00  ¥ñ=10.0  [INFEAS]  (inner=35)
+  [AL] Outer  2  torque=2232.2  angle=4.55deg  ¥ë=110.13  ¥ñ=10.0  [INFEAS]  (inner=32)
+  [AL] Outer  3  torque=2827.5  angle=0.65deg  ¥ë=150.66  ¥ñ=50.0  [INFEAS]  (inner=37)
+  [AL] Outer  4  torque=2854.7  angle=0.48deg  ¥ë=158.10  ¥ñ=50.0  [FEAS]  (inner=16)
+  [AL] Outer  5  torque=2854.7  angle=0.48deg  ¥ë=156.92  ¥ñ=50.0  [FEAS]  (inner=16)
+  Converged: feasible & torque stable (¥Ätc=0.00)
+
+============================================================
+Torque cost : 2854.7
+Angle error : 0.48 deg (tol=0.5)
+Time        : 31.9s (5 outer iters)
+Final ¥ë     : 156.92
+Final ¥ñ     : 50.0
+============================================================
+  -> C:\CVAE\outputs/plots/torque_direct\trajectory.png
+  -> C:\CVAE\outputs/plots/torque_direct\convergence.png
+  -> C:\CVAE\outputs/plots/torque_direct\torque_norm.png
+Results saved to C:\CVAE\outputs/plots/torque_direct/results.npz

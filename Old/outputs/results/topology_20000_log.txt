@@ -1,0 +1,89 @@
+=== TDA on 20000 Collision-Free Dataset ===
+
+Original:       (5000, 100, 6)
+Collision-Free: (20000, 100, 6)
+
+=== Node-based Original (5000): 5000 traj in 600D ===
+  PCA 10D cum var: 0.878
+  Top 5 var: [0.296 0.169 0.093 0.081 0.062]
+  ID (TwoNN on 10D PCA): 3.31
+  ripser 1.0s  B0=1
+  H0 top5: [22.39 21.38 21.06 19.88 19.85]
+  H1 top5: [10.3   9.68  6.88  5.95  5.13]
+  H1 loops (>0.5): 197
+
+=== Node-based Col-Free (20000): 20000 traj in 600D ===
+  PCA 10D cum var: 0.924
+  Top 5 var: [0.542 0.073 0.067 0.05  0.043]
+  ID (TwoNN on 10D PCA): 4.39
+  ripser 1.4s  B0=1
+  H0 top5: [18.56 17.69 16.53 16.   15.42]
+  H1 top5: [4.37 3.61 3.56 3.54 3.4 ]
+  H1 loops (>0.5): 1111
+
+=== Waypoint-space Original (5000): 5000 traj in 18D ===
+  ID (raw 18D): 3.37
+  PCA 10D cum var: 0.872
+  Top 5 var: [0.283 0.176 0.091 0.076 0.065]
+  ID (10D PCA): 3.31
+  ripser(18D) 1.0s  B0=1
+  H0 top5: [6.14 5.79 5.63 5.56 5.51]
+  H1 top5: [2.41 2.34 1.68 1.55 1.45]
+  H1 loops (>0.3): 56
+
+=== Waypoint-space Col-Free (20000): 20000 traj in 18D ===
+  ID (raw 18D): 4.51
+  PCA 10D cum var: 0.920
+  Top 5 var: [0.526 0.083 0.07  0.046 0.04 ]
+  ID (10D PCA): 4.39
+  ripser(18D) 1.7s  B0=3
+  H0 top5: [5.96 5.23 4.27 4.02 3.99]
+  H1 top5: [0.98 0.91 0.91 0.8  0.8 ]
+  H1 loops (>0.3): 511
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\node_pca_2d_20000.png
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\node_pca_3d_20000.png
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\node_persistence_diagrams_20000.png
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\node_h0_gap_20000.png
+C:\CVAE\scripts\optimize\topology_analysis_20000.py:183: MatplotlibDeprecationWarning: The get_cmap function was deprecated in Matplotlib 3.7 and will be removed in 3.11. Use ``matplotlib.colormaps[name]`` or ``matplotlib.colormaps.get_cmap()`` or ``pyplot.get_cmap()`` instead.
+  cmap = plt.cm.get_cmap("tab10")
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\wp_pca_2d_20000.png
+C:\CVAE\scripts\optimize\topology_analysis_20000.py:208: MatplotlibDeprecationWarning: The get_cmap function was deprecated in Matplotlib 3.7 and will be removed in 3.11. Use ``matplotlib.colormaps[name]`` or ``matplotlib.colormaps.get_cmap()`` or ``pyplot.get_cmap()`` instead.
+  cmap = plt.cm.get_cmap("tab10")
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\wp_pca_3d_20000.png
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\wp_persistence_diagrams_20000.png
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\wp_h0_gap_20000.png
+C:\CVAE\scripts\optimize\topology_analysis_20000.py:252: MatplotlibDeprecationWarning: The get_cmap function was deprecated in Matplotlib 3.7 and will be removed in 3.11. Use ``matplotlib.colormaps[name]`` or ``matplotlib.colormaps.get_cmap()`` or ``pyplot.get_cmap()`` instead.
+  cmap = plt.cm.get_cmap("tab10")
+Saved: C:\CVAE\outputs/results/topology_analysis_20000\wp_mode_sequences_free_20000.png
+
+--- Collision-Free mode breakdown (k=3) ---
+  mode 0: N=4497  (22.5%)
+    w1: [-0.60, +0.03, -2.14, -1.40, +0.70, +0.23]
+    w2: [+3.05, -0.53, -1.68, -1.05, +0.91, +0.21]
+    w3: [+0.06, +0.34, +1.34, -0.82, -0.23, +0.89]
+  mode 1: N=7468  (37.3%)
+    w1: [+2.26, +0.26, +1.80, -0.74, -0.77, -0.00]
+    w2: [-1.41, -0.56, +2.49, +1.72, -0.35, +0.60]
+    w3: [-1.67, +1.46, +1.03, -1.55, +1.16, +0.59]
+  mode 2: N=8035  (40.2%)
+    w1: [-0.96, -0.21, -1.94, -1.07, +0.91, -1.93]
+    w2: [+2.70, -0.29, -1.95, -0.55, -0.01, +1.04]
+    w3: [+1.85, +0.29, +1.02, -1.07, +0.15, +1.55]
+
+============================================================================
+SUMMARY - 20000 Collision-Free vs 5000 Original
+============================================================================
+Metric                                     Orig (5000)     Col-Free (20000)
+----------------------------------------------------------------------------
+Node-based B0                                        1                    1
+Node-based ID (10D PCA)                           3.31                 4.39
+Node-based H0 top1                               22.39                18.56
+Node-based H0 top1/top2                           1.05                 1.05
+
+Waypoint-space B0                                    1                    3
+Waypoint-space ID (raw 18D)                       3.37                 4.51
+Waypoint-space ID (10D PCA)                       3.31                 4.39
+Waypoint-space H0 top1                            6.14                 5.96
+Waypoint-space H0 top1/top2                       1.06                 1.14
+
+=== Done. Output: C:\CVAE\outputs/results/topology_analysis_20000 ===

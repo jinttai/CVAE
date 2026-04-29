@@ -1,3 +1,6 @@
 [submodule "space_robot_planning/src/dynamics"]
 	path = space_robot_planning/src/dynamics
 	url = https://github.com/jinttai/spart_python.git
+[submodule "IFAC"]
+	path = IFAC
+	url = https://github.com/jinttai/IFAC.git

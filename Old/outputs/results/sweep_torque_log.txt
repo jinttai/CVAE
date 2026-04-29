@@ -1,0 +1,54 @@
+Device: cpu
+Loaded CVAE from C:\CVAE\outputs/weights/cvae_debug/v5_joint_change.pth
+
+======================================================================
+Goal 1/5: roll=15.0, pitch=15.0, yaw=-15.0 deg
+======================================================================
+  CVAE init        : tc=   31929.3  ae=0.265¡Æ
+  Newton+Nullspace : tc=    3308.9  ae=0.338¡Æ  (94.0s)
+  Augmented Lagr.  : tc=    2853.1  ae=0.499¡Æ  (27.0s)
+
+======================================================================
+Goal 2/5: roll=30.0, pitch=20.0, yaw=-45.0 deg
+======================================================================
+  CVAE init        : tc=   53695.2  ae=0.453¡Æ
+  Newton+Nullspace : tc=    7278.2  ae=0.079¡Æ  (110.5s)
+  Augmented Lagr.  : tc=    6155.4  ae=0.473¡Æ  (17.6s)
+
+======================================================================
+Goal 3/5: roll=45.0, pitch=-30.0, yaw=60.0 deg
+======================================================================
+  CVAE init        : tc=   46100.1  ae=4.412¡Æ
+  Newton+Nullspace : tc=    9613.5  ae=0.371¡Æ  (142.8s)
+  Augmented Lagr.  : tc=    9536.2  ae=0.491¡Æ  (31.0s)
+
+======================================================================
+Goal 4/5: roll=-20.0, pitch=-40.0, yaw=80.0 deg
+======================================================================
+  CVAE init        : tc=  135829.7  ae=7.793¡Æ
+  Newton+Nullspace : tc=    8686.6  ae=0.069¡Æ  (124.5s)
+  Augmented Lagr.  : tc=    8780.3  ae=0.411¡Æ  (18.5s)
+
+======================================================================
+Goal 5/5: roll=0.0, pitch=60.0, yaw=0.0 deg
+======================================================================
+  CVAE init        : tc=   63670.7  ae=1.701¡Æ
+  Newton+Nullspace : tc=    8158.3  ae=0.125¡Æ  (116.7s)
+  Augmented Lagr.  : tc=    7985.4  ae=0.496¡Æ  (25.8s)
+
+================================================================================
+Goal (r,p,y)       |    CVAE init |    Nullspace |           AL |   NS ae¡Æ |   AL ae¡Æ
+--------------------------------------------------------------------------------
+[+15,+15,-15]      |      31929.3 |       3308.9 |       2853.1 |    0.338 |    0.499
+[+30,+20,-45]      |      53695.2 |       7278.2 |       6155.4 |    0.079 |    0.473
+[+45,-30,+60]      |      46100.1 |       9613.5 |       9536.2 |    0.371 |    0.491
+[-20,-40,+80]      |     135829.7 |       8686.6 |       8780.3 |    0.069 |    0.411
+[+0,+60,+0]        |      63670.7 |       8158.3 |       7985.4 |    0.125 |    0.496
+
+Plots saved to C:\CVAE\outputs/plots/torque_sweep:
+  -> C:\CVAE\outputs/plots/torque_sweep\sweep_summary.png
+  -> C:\CVAE\outputs/plots/torque_sweep\sweep_tradeoff.png
+  -> C:\CVAE\outputs/plots/torque_sweep\sweep_runtime.png
+  -> C:\CVAE\outputs/plots/torque_sweep\sweep_reduction.png
+  -> C:\CVAE\outputs/plots/torque_sweep\sweep_torque_norm.png
+  -> C:\CVAE\outputs/plots/torque_sweep\sweep_results.npz

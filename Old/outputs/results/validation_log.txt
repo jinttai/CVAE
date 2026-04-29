@@ -1,0 +1,108 @@
+=== Cluster Validation on 5000 vs 20000 ===
+
+
+=== Test 1: Silhouette sweep ===
+
+Col-Free 5000 (18D):
+  k=2: silhouette=0.4465
+  k=3: silhouette=0.4891
+  k=4: silhouette=0.3046
+  k=5: silhouette=0.2790
+  k=6: silhouette=0.2001
+  k=7: silhouette=0.2051
+  k=8: silhouette=0.1943
+
+Col-Free 20000 (18D):
+  k=2: silhouette=0.4412
+  k=3: silhouette=0.2573
+  k=4: silhouette=0.2457
+  k=5: silhouette=0.1436
+  k=6: silhouette=0.1468
+  k=7: silhouette=0.1627
+  k=8: silhouette=0.1519
+
+=== Test 2: Gap statistic (vs uniform null) ===
+
+Col-Free 5000:
+  k=1: log(Wk)=10.919  gap=0.329
+  k=2: log(Wk)=10.371  gap=0.814
+  k=3: log(Wk)=9.835  gap=1.308
+  k=4: log(Wk)=9.764  gap=1.345
+  k=5: log(Wk)=9.725  gap=1.364
+  k=6: log(Wk)=9.690  gap=1.375
+  k=7: log(Wk)=9.657  gap=1.383
+  k=8: log(Wk)=9.631  gap=1.398
+
+Col-Free 20000:
+  k=1: log(Wk)=11.251  gap=0.027
+  k=2: log(Wk)=10.567  gap=0.650
+  k=3: log(Wk)=10.484  gap=0.693
+  k=4: log(Wk)=10.423  gap=0.720
+  k=5: log(Wk)=10.353  gap=0.770
+  k=6: log(Wk)=10.304  gap=0.795
+  k=7: log(Wk)=10.269  gap=0.807
+  k=8: log(Wk)=10.216  gap=0.848
+
+=== Test 3: DBSCAN (no k required) ===
+
+Col-Free 5000:
+  suggested eps: ['2.411', '2.835', '3.286']
+  eps=2.411: n_clusters=4  noise=664/3000  top sizes=[np.int64(1384), np.int64(468), np.int64(453), np.int64(31)]
+  eps=2.835: n_clusters=4  noise=180/3000  top sizes=[np.int64(1676), np.int64(610), np.int64(518), np.int64(16)]
+  eps=3.286: n_clusters=2  noise=54/3000  top sizes=[np.int64(2229), np.int64(717)]
+
+Col-Free 20000:
+  suggested eps: ['3.492', '3.911', '4.269']
+  eps=3.492: n_clusters=3  noise=444/3000  top sizes=[np.int64(1465), np.int64(1036), np.int64(55)]
+  eps=3.911: n_clusters=3  noise=61/3000  top sizes=[np.int64(1841), np.int64(1042), np.int64(56)]
+  eps=4.269: n_clusters=3  noise=5/3000  top sizes=[np.int64(1896), np.int64(1043), np.int64(56)]
+
+=== Test 4: KDE valley detection (2D PCA) ===
+
+Col-Free 5000:
+Saved: C:\CVAE\outputs/results/topology_cluster_validation\kde_5k.png
+
+Col-Free 20000:
+Saved: C:\CVAE\outputs/results/topology_cluster_validation\kde_20k.png
+
+=== Test 5: Gaussian null baseline ===
+
+--- Gaussian null for 5000 ---
+  Gaussian H0 top5: [6.735 5.338 4.592 4.312 4.166]
+  top1/top2 ratio: 1.262
+
+--- Gaussian null for 20000 ---
+  Gaussian H0 top5: [5.743 5.332 5.26  5.22  5.151]
+  top1/top2 ratio: 1.077
+
+=== Test 6: Subsample 20000 ¡æ 5000 consistency ===
+
+--- Subsample consistency (20000 ¡æ 5000 ¡¿ 5 trials) ---
+  trial 0: H0 top3: [5.97 5.13 4.49]  gap(top2/top3)=1.14  silhouette(k=3)=0.259
+  trial 1: H0 top3: [6.48 4.5  4.38]  gap(top2/top3)=1.03  silhouette(k=3)=0.259
+  trial 2: H0 top3: [5.38 4.78 4.3 ]  gap(top2/top3)=1.11  silhouette(k=3)=0.253
+  trial 3: H0 top3: [5.69 5.02 4.18]  gap(top2/top3)=1.20  silhouette(k=3)=0.265
+  trial 4: H0 top3: [5.58 4.99 4.42]  gap(top2/top3)=1.13  silhouette(k=3)=0.253
+  gap_23: mean=1.12 ¡¾ 0.06
+  silhouette: mean=0.258 ¡¾ 0.004
+
+Saved: C:\CVAE\outputs/results/topology_cluster_validation\validation_summary.png
+
+======================================================================
+VERDICT TABLE
+======================================================================
+Test                                             5000        20000
+----------------------------------------------------------------------
+Silhouette k=2                                  0.447        0.441
+Silhouette k=3                                  0.489        0.257
+Silhouette k=4                                  0.305        0.246
+Silhouette best k                                   3            2
+Gap stat max-k                                      8            8
+DBSCAN (median eps) # clusters                      4            3
+KDE marginal peaks (PC1)                            3            2
+H0 gap top2/top3 (data)                          1.38         1.04
+H0 gap top2/top3 (gauss-null)                    1.16         1.01
+Subsample 20k¡æ5k gap mean                                     1.12
+Subsample 20k¡æ5k silhouette mean                             0.258
+
+=== Done. Output: C:\CVAE\outputs/results/topology_cluster_validation ===
